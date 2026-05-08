@@ -1,8 +1,40 @@
 """Shared schemas across chimera packages.
 
 Anything that crosses package boundaries lives here so we have one canonical
-definition: TaskClassification (AMR output), FileContext (context resolver),
-UsageRecord (usage tracker), RoutingDecision (router output), RuntimeStatus.
+definition. Imports from chimera, scarlet, seance, specter all resolve here.
 """
 
 __version__ = "0.1.0.dev0"
+
+from .classification import (
+    ComplexityTier,
+    TaskClassification,
+    TaskType,
+    ThinkingLevel,
+)
+from .context import ContextBundle, FileContext, ResolutionSource
+from .routing import RoutingDecision
+from .runtime import ComponentHealth, ComponentStatus, RuntimeStatus
+from .usage import Provider, Source, UsageRecord
+
+__all__ = [
+    # classification (AMR)
+    "TaskClassification",
+    "TaskType",
+    "ComplexityTier",
+    "ThinkingLevel",
+    # context (resolver)
+    "FileContext",
+    "ContextBundle",
+    "ResolutionSource",
+    # usage (tracker)
+    "UsageRecord",
+    "Provider",
+    "Source",
+    # routing (router decision)
+    "RoutingDecision",
+    # runtime (chimera dev status)
+    "RuntimeStatus",
+    "ComponentHealth",
+    "ComponentStatus",
+]

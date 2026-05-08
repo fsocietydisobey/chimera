@@ -303,6 +303,8 @@ name = "chimera"
 version = "0.1.0.dev0"
 source = { editable = "packages/chimera" }
 dependencies = [
+    { name = "chimera-transport" },
+    { name = "chimera-types" },
     { name = "fastapi" },
     { name = "langgraph" },
     { name = "pydantic" },
@@ -321,6 +323,8 @@ postgres = [
 
 [package.metadata]
 requires-dist = [
+    { name = "chimera-transport", editable = "shared/transport" },
+    { name = "chimera-types", editable = "shared/types" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "langgraph", specifier = ">=0.2" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'all'", specifier = ">=3.2" },

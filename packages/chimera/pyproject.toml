@@ -13,7 +13,13 @@ dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "sse-starlette>=2.1",
+    "chimera-types",
+    "chimera-transport",
 ]
+
+[tool.uv.sources]
+chimera-types = { workspace = true }
+chimera-transport = { workspace = true }
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2"]
