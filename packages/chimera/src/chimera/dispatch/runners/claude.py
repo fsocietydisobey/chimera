@@ -173,8 +173,29 @@ async def run_claude(
     timeout: int | None = None,
     cwd: str | None = None,
     **kwargs: object,
+) -> str:
+    """Convenience wrapper around `claude_runner.run()` — returns the response
+    text as a string.
+
+    Backwards compatibility: legacy chimera callers (migrated nodes,
+    `mcp__chimera__research`, `mcp__chimera__architect`) expect string-return
+    semantics. New code should use `claude_runner.run()` directly to get the
+    full `RunnerResult` (with token counts, latency, session id).
+    """
+    result = await claude_runner.run(prompt, model=model, timeout=timeout, cwd=cwd, **kwargs)
+    return result.text
+
+
+async def run_claude_full(
+    prompt: str,
+    *,
+    model: str | None = None,
+    timeout: int | None = None,
+    cwd: str | None = None,
+    **kwargs: object,
 ) -> RunnerResult:
-    """Convenience wrapper around `claude_runner.run()`. See ClaudeRunner.run."""
+    """Like `run_claude` but returns the full RunnerResult. Used by chimera
+    task / dispatch / structured-output flows that need token counts."""
     return await claude_runner.run(prompt, model=model, timeout=timeout, cwd=cwd, **kwargs)
 
 

@@ -297,8 +297,7 @@ async def _run_model(prompt: str, project_path: Path, project_name: str) -> str 
                 # permission_mode=None: no file edits should occur — the prompt
                 # is self-contained, we don't want claude touching anything.
                 # effort=high: extended thinking for nuanced classification.
-                # NEW (chimera v2): runners return RunnerResult; pull .text.
-                result = await run_claude(
+                raw = await run_claude(
                     prompt,
                     cwd=str(project_path),
                     timeout=600,
@@ -306,10 +305,8 @@ async def _run_model(prompt: str, project_path: Path, project_name: str) -> str 
                     effort="high",
                     model=claude_model,
                 )
-                raw = result.text
             else:
-                result = await run_gemini(prompt, cwd=str(project_path), timeout=180)
-                raw = result.text
+                raw = await run_gemini(prompt, cwd=str(project_path), timeout=180)
         except Exception as exc:
             log.warning("scan: %s call failed for %s: %s", model, project_name, exc)
             continue

@@ -35,6 +35,7 @@ from chimera.graphs.supervisor import build_orchestrator_graph
 from chimera.graphs.swarm import build_swarm_graph
 from chimera.graphs.toolbuilder import build_toolbuilder_graph
 from chimera.log import get_logger, setup_logging
+from chimera.monitor.mcp_calls import logged_tool
 from chimera.prompts import (
     ARCHITECT_SYSTEM_PROMPT,
     BRAINSTORM_SYSTEM_PROMPT,
@@ -138,6 +139,7 @@ mcp = FastMCP("chimera")
 
 
 @mcp.tool()
+@logged_tool("health")
 async def health() -> str:
     """Quick health check — returns server status and uptime.
 
@@ -161,6 +163,7 @@ async def health() -> str:
 
 
 @mcp.tool()
+@logged_tool("research")
 async def research(question: str, context: str = "", cwd: str = "") -> str:
     """Deep research using Gemini CLI. Use for domain exploration, technology
     investigation, or understanding unknowns before planning.
@@ -181,6 +184,7 @@ async def research(question: str, context: str = "", cwd: str = "") -> str:
 
 
 @mcp.tool()
+@logged_tool("architect")
 async def architect(goal: str, context: str = "", constraints: str = "", cwd: str = "") -> str:
     """Design an implementation plan using Claude Code CLI.
 
@@ -304,6 +308,7 @@ def _open_in_default_app(path: Path) -> None:
 
 
 @mcp.tool()
+@logged_tool("brainstorm")
 async def brainstorm(topic: str, context: str = "", cwd: str = "") -> str:
     """Single-call Claude brainstorm: divergent generation + self-critique.
 
@@ -344,6 +349,7 @@ async def brainstorm(topic: str, context: str = "", cwd: str = "") -> str:
 
 
 @mcp.tool()
+@logged_tool("classify")
 async def classify(task_description: str) -> str:
     """Classify a task into a tier (research / architect / implement) and
     recommend the right pipeline. Uses a fast, cheap API model.
@@ -361,6 +367,7 @@ async def classify(task_description: str) -> str:
 
 
 @mcp.tool()
+@logged_tool("chain")
 async def chain(task_description: str, context: str = "", thread_id: str = "") -> str:
     """Start a LangGraph pipeline in the background and return immediately.
 
@@ -436,6 +443,7 @@ async def chain(task_description: str, context: str = "", thread_id: str = "") -
 
 
 @mcp.tool()
+@logged_tool("chain_pipeline")
 async def chain_pipeline(task_description: str, context: str = "", thread_id: str = "") -> str:
     """Start the SPR-4 pipeline (CHIMERA) in the background.
 
@@ -518,6 +526,7 @@ async def chain_pipeline(task_description: str, context: str = "", thread_id: st
 
 
 @mcp.tool()
+@logged_tool("chain_refiner")
 async def chain_refiner(max_cycles: int = 50, budget: float = 5.0) -> str:
     """Start the CLR continuous refinement loop.
 
@@ -569,6 +578,7 @@ async def chain_refiner(max_cycles: int = 50, budget: float = 5.0) -> str:
 
 
 @mcp.tool()
+@logged_tool("swarm")
 async def swarm(goal: str, budget: float = 2.0, max_agents: int = 10) -> str:
     """Start a PDE parallel dispatch.
 
@@ -632,6 +642,7 @@ async def swarm(goal: str, budget: float = 2.0, max_agents: int = 10) -> str:
 
 
 @mcp.tool()
+@logged_tool("chain_hypervisor")
 async def chain_hypervisor(budget: float = 10.0) -> str:
     """Start HVD — the autonomous meta-orchestrator.
 
@@ -688,6 +699,7 @@ async def chain_hypervisor(budget: float = 10.0) -> str:
 
 
 @mcp.tool()
+@logged_tool("chain_components")
 async def chain_components() -> str:
     """Run the ACL (Atomic Component Library) validation pipeline.
 
@@ -734,6 +746,7 @@ async def chain_components() -> str:
 
 
 @mcp.tool()
+@logged_tool("chain_deadcode")
 async def chain_deadcode() -> str:
     """Run the DCE (Dead Code Eliminator) pipeline.
 
@@ -781,6 +794,7 @@ async def chain_deadcode() -> str:
 
 
 @mcp.tool()
+@logged_tool("chain_toolbuilder")
 async def chain_toolbuilder() -> str:
     """Run the POB (Proactive Observation Builder) pipeline.
 
@@ -828,6 +842,7 @@ async def chain_toolbuilder() -> str:
 
 
 @mcp.tool()
+@logged_tool("status")
 async def status(job_id: str = "") -> str:
     """Check the status of a background pipeline job. Returns instantly.
 
@@ -853,6 +868,7 @@ async def status(job_id: str = "") -> str:
 
 
 @mcp.tool()
+@logged_tool("approve")
 async def approve(job_id: str, feedback: str = "") -> str:
     """Approve or reject a paused pipeline job.
 
@@ -927,6 +943,7 @@ async def approve(job_id: str, feedback: str = "") -> str:
 
 
 @mcp.tool()
+@logged_tool("history")
 async def history(thread_id: str, limit: int = 10) -> str:
     """Show the checkpoint history for a thread. Use this to see
     what happened at each step.
@@ -988,6 +1005,7 @@ async def history(thread_id: str, limit: int = 10) -> str:
 
 
 @mcp.tool()
+@logged_tool("rewind")
 async def rewind(thread_id: str, checkpoint_id: str, new_task: str = "") -> str:
     """Rewind to a previous checkpoint and re-run from that point.
 
@@ -1211,6 +1229,7 @@ from chimera.server import monitor_tools as _monitor_tools
 
 
 @mcp.tool()
+@logged_tool("monitor_projects")
 async def monitor_projects() -> str:
     """List LangGraph projects the chimera-monitor daemon has discovered.
 
@@ -1222,6 +1241,7 @@ async def monitor_projects() -> str:
 
 
 @mcp.tool()
+@logged_tool("monitor_active_runs")
 async def monitor_active_runs(project: str) -> str:
     """Threads currently running, paused, or starting in a project.
 
@@ -1238,6 +1258,7 @@ async def monitor_active_runs(project: str) -> str:
 
 
 @mcp.tool()
+@logged_tool("monitor_thread_state")
 async def monitor_thread_state(project: str, thread_id: str, recent: int = 5) -> str:
     """Full state + recent N checkpoints for one thread.
 
@@ -1255,6 +1276,7 @@ async def monitor_thread_state(project: str, thread_id: str, recent: int = 5) ->
 
 
 @mcp.tool()
+@logged_tool("monitor_find_stuck")
 async def monitor_find_stuck(project: str) -> str:
     """Find threads classified as stuck (running >3× threshold) or
     stale (>1× threshold) by the monitor's heuristics.
@@ -1270,6 +1292,7 @@ async def monitor_find_stuck(project: str) -> str:
 
 
 @mcp.tool()
+@logged_tool("monitor_auto_fix")
 async def monitor_auto_fix(check: str, project: str = "") -> str:
     """Propose a fix for the most-recent anomaly matching `check`+`project`.
 
@@ -1325,6 +1348,7 @@ async def monitor_auto_fix(check: str, project: str = "") -> str:
 
 
 @mcp.tool()
+@logged_tool("monitor_anomalies")
 async def monitor_anomalies(limit: int = 20, only_failures: bool = True) -> str:
     """Self-watch findings — invariant checks the chimera-monitor daemon
     runs against itself every 5 min.
@@ -1343,6 +1367,7 @@ async def monitor_anomalies(limit: int = 20, only_failures: bool = True) -> str:
 
 
 @mcp.tool()
+@logged_tool("monitor_api_routes")
 async def monitor_api_routes(project: str, graph_linked_only: bool = False) -> str:
     """FastAPI routes for a project, with which routes invoke a LangGraph.
 
@@ -1361,6 +1386,7 @@ async def monitor_api_routes(project: str, graph_linked_only: bool = False) -> s
 
 
 @mcp.tool()
+@logged_tool("monitor_frontend_components")
 async def monitor_frontend_components(project: str, with_api_calls_only: bool = False) -> str:
     """React/Next components in a project + their API calls + state hooks.
 
@@ -1373,6 +1399,7 @@ async def monitor_frontend_components(project: str, with_api_calls_only: bool = 
 
 
 @mcp.tool()
+@logged_tool("monitor_schema_drift")
 async def monitor_schema_drift(project: str) -> str:
     """Compare a project's Pydantic/SQLAlchemy models against the
     actual Postgres schema. Returns drift reports — extra fields in
@@ -1386,6 +1413,7 @@ async def monitor_schema_drift(project: str) -> str:
 
 
 @mcp.tool()
+@logged_tool("monitor_heartbeat")
 async def monitor_heartbeat() -> str:
     """Liveness check for the chimera-monitor daemon's self-watch loop.
 
@@ -1397,6 +1425,7 @@ async def monitor_heartbeat() -> str:
 
 
 @mcp.tool()
+@logged_tool("monitor_topology")
 async def monitor_topology(project: str) -> str:
     """Compiled-graph topology for a project: graph names + node counts.
 
@@ -1416,6 +1445,7 @@ async def monitor_topology(project: str) -> str:
 
 
 @mcp.tool()
+@logged_tool("spawn_process")
 async def spawn_process(
     cmd: list[str],
     label: str,
@@ -1441,6 +1471,7 @@ async def spawn_process(
 
 
 @mcp.tool()
+@logged_tool("wait_for_process")
 async def wait_for_process(
     label: str,
     completion_signal: str | None = None,
@@ -1472,6 +1503,7 @@ async def wait_for_process(
 
 
 @mcp.tool()
+@logged_tool("follow_process")
 async def follow_process(label: str, max_chunks: int = 100) -> str:
     """Snapshot of a tracked process's current output. Non-blocking.
 
@@ -1487,12 +1519,14 @@ async def follow_process(label: str, max_chunks: int = 100) -> str:
 
 
 @mcp.tool()
+@logged_tool("list_processes")
 async def list_processes() -> str:
     """List all tracked subprocesses — running + recently-finished."""
     return await _monitor_tools.list_processes()
 
 
 @mcp.tool()
+@logged_tool("kill_process")
 async def kill_process(label: str) -> str:
     """Stop a tracked process (SIGTERM, then SIGKILL after 5s grace).
 
@@ -1509,6 +1543,7 @@ async def kill_process(label: str) -> str:
 
 
 @mcp.tool()
+@logged_tool("session_log_decision")
 async def session_log_decision(session_id: str, text: str, why: str = "") -> str:
     """Record a decision the agent has made.
 
@@ -1526,6 +1561,7 @@ async def session_log_decision(session_id: str, text: str, why: str = "") -> str
 
 
 @mcp.tool()
+@logged_tool("session_log_touch")
 async def session_log_touch(
     session_id: str,
     file: str,
@@ -1549,6 +1585,7 @@ async def session_log_touch(
 
 
 @mcp.tool()
+@logged_tool("session_log_question")
 async def session_log_question(session_id: str, text: str) -> str:
     """Open a question for parallel sessions to answer.
 
@@ -1566,6 +1603,7 @@ async def session_log_question(session_id: str, text: str) -> str:
 
 
 @mcp.tool()
+@logged_tool("session_set_status")
 async def session_set_status(session_id: str, status: str, detail: str = "") -> str:
     """Update agent's high-level state — what kind of work is in flight?
 
@@ -1582,6 +1620,7 @@ async def session_set_status(session_id: str, status: str, detail: str = "") -> 
 
 
 @mcp.tool()
+@logged_tool("session_post_answer")
 async def session_post_answer(
     target_session_id: str,
     question_id: str,
@@ -1608,6 +1647,7 @@ async def session_post_answer(
 
 
 @mcp.tool()
+@logged_tool("session_state")
 async def session_state(session_id: str, recent: int = 10) -> str:
     """Full digest of a session's externalized state.
 
@@ -1625,6 +1665,7 @@ async def session_state(session_id: str, recent: int = 10) -> str:
 
 
 @mcp.tool()
+@logged_tool("session_pending_notes")
 async def session_pending_notes(session_id: str, mark_read: bool = True) -> str:
     """**Inbox read.** Get unread answers other sessions have posted to your
     open questions.
@@ -1641,6 +1682,7 @@ async def session_pending_notes(session_id: str, mark_read: bool = True) -> str:
 
 
 @mcp.tool()
+@logged_tool("session_recent_decisions")
 async def session_recent_decisions(recent_per_session: int = 5) -> str:
     """Recent decisions across ALL sessions. Cross-session view.
 
@@ -1654,9 +1696,57 @@ async def session_recent_decisions(recent_per_session: int = 5) -> str:
 
 
 @mcp.tool()
+@logged_tool("session_list")
 async def session_list() -> str:
     """List all tracked sessions — last activity, status, counts."""
     return await _monitor_tools.session_list()
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 — MCP call telemetry. Answers "is chimera being used effectively?"
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+@logged_tool("usage_report")
+async def usage_report(window_minutes: int = 1440) -> str:
+    """Aggregate report: which chimera MCP tools were called in the time
+    window, how often, with what success rate, and how many polls
+    `wait_for_process` replaced.
+
+    Use to answer "is the agent using chimera effectively?" — surfaces:
+      - which tools were called (by frequency)
+      - p50/p95 latency per tool
+      - failure rate per tool with sampled error messages
+      - polling-replacement savings (the headline cost-of-context pitch)
+
+    Args:
+        window_minutes: time window. Default 1440 (24h). Try 60 for "last
+            hour" or 10080 for "last week".
+    """
+    return await _monitor_tools.usage_report(window_minutes)
+
+
+@mcp.tool()
+@logged_tool("list_mcp_calls")
+async def list_mcp_calls(
+    window_minutes: int | None = None,
+    tool: str | None = None,
+    only_failures: bool = False,
+    limit: int = 50,
+) -> str:
+    """Recent chimera MCP tool invocations, newest first.
+
+    Use to drill into specific tools or to debug failures. Pair with
+    `usage_report` for the aggregate view.
+
+    Args:
+        window_minutes: filter to this time window; None = no time filter.
+        tool: filter to one tool name (e.g. 'wait_for_process').
+        only_failures: True hides successful calls.
+        limit: max calls to return (default 50).
+    """
+    return await _monitor_tools.list_calls(window_minutes, tool, only_failures, limit)
 
 
 def main():

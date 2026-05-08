@@ -123,7 +123,21 @@ async def run_gemini(
     timeout: int | None = None,
     cwd: str | None = None,
     **kwargs: object,
+) -> str:
+    """Convenience wrapper — returns response text as string for legacy callers."""
+    result = await gemini_runner.run(prompt, model=model, timeout=timeout, cwd=cwd, **kwargs)
+    return result.text
+
+
+async def run_gemini_full(
+    prompt: str,
+    *,
+    model: str | None = None,
+    timeout: int | None = None,
+    cwd: str | None = None,
+    **kwargs: object,
 ) -> RunnerResult:
+    """Like `run_gemini` but returns the full RunnerResult (with token counts)."""
     return await gemini_runner.run(prompt, model=model, timeout=timeout, cwd=cwd, **kwargs)
 
 

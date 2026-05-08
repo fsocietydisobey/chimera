@@ -230,6 +230,29 @@ need wiring in Phase 6+9.
 
 ---
 
+## Phase 13 — MCP call telemetry ✅ DONE
+
+| Item | Status | Where | Notes |
+|---|---|---|---|
+| `logged_tool` decorator | ✅ | `monitor/mcp_calls.py` | wraps every MCP tool; appends ts/tool/args/elapsed/success/output_size/error to JSONL |
+| Applied to all 42 chimera MCP tools | ✅ | `server/mcp.py` | one-shot script inserted decorator after each `@mcp.tool()` |
+| `~/.local/state/chimera/mcp-calls.jsonl` | ✅ | append-only, line-atomic via asyncio lock |
+| `GET /api/mcp-calls` | ✅ | `monitor/api/mcp_calls.py` | filterable: window_minutes, tool, only_failures |
+| `GET /api/mcp-calls/summary` | ✅ | `monitor/api/mcp_calls.py` | aggregate by-tool stats + polling-replacement metric |
+| `mcp__chimera__usage_report(window_minutes)` | ✅ | `server/mcp.py` | "is chimera being used effectively?" answer in one call |
+| `mcp__chimera__list_mcp_calls(...)` | ✅ | `server/mcp.py` | recent invocations, drill-down |
+| Polling-replacement estimator | ✅ | `summarize()` | counts wait_for_process calls + their blocked time, divides by 5s/poll baseline |
+| Smoke-tested | ✅ | | 10 synthetic records → summary correct, by-tool breakdown correct, error samples captured |
+
+**Side fix in same commit:** `run_claude` and `run_gemini` module-level
+convenience functions had been migrated to return `RunnerResult` (breaking
+all legacy callers that expected str). Reverted to returning `.text` for
+backwards compat. Added `run_claude_full` / `run_gemini_full` for new
+callers that want the full result object. New `chimera task` flow already
+uses `runner.run()` directly so it's unaffected.
+
+---
+
 ## Phase 12 — Process observability ✅ DONE (backend; UI deferred)
 
 | Item | Status | Where | Notes |

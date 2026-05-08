@@ -550,6 +550,122 @@ def _tail(text: str, max_chars: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 13 — MCP call telemetry. "Is chimera being used effectively?"
+# ---------------------------------------------------------------------------
+
+
+async def usage_report(window_minutes: int = 1440) -> str:
+    """Aggregate report: which chimera MCP tools were called, how often, with
+    what success rate, and how many polls `wait_for_process` replaced.
+
+    Default window is 24h (1440 min). Pass smaller for "what just happened"
+    or larger for weekly patterns.
+
+    Read by sessions wanting to know if chimera is providing value, and
+    by humans investigating "is the agent using the right tools?"
+    """
+    data = _get(f"/api/mcp-calls/summary?window_minutes={window_minutes}")
+    if isinstance(data, str):
+        return data
+
+    parts = []
+    win = data.get("window_minutes", window_minutes)
+    if win >= 1440:
+        win_label = f"last {win / 1440:.0f}d"
+    elif win >= 60:
+        win_label = f"last {win / 60:.0f}h"
+    else:
+        win_label = f"last {win}m"
+
+    total = data.get("total_calls", 0)
+    failures = data.get("total_failures", 0)
+    rate = data.get("failure_rate", 0.0)
+
+    if total == 0:
+        return (
+            f"📭 No chimera MCP tool calls in the {win_label}.\n\n"
+            "Either the agent hasn't been using chimera, or the chimera MCP\n"
+            "server in this Claude Code session hasn't been restarted since\n"
+            "the telemetry decorator was added (Phase 13). "
+            "**Restart Claude Code to pick up the logging.**"
+        )
+
+    parts.append(
+        f"**chimera usage — {win_label}:** {total} calls "
+        f"({failures} failed, {rate:.0%} failure rate)\n"
+    )
+
+    # Polling-replacement metric — the headline value pitch
+    pr = data.get("polling_replacement", {})
+    wait_calls = pr.get("wait_calls", 0)
+    blocked_s = pr.get("total_blocked_seconds", 0.0)
+    polls_saved = pr.get("estimated_polls_saved", 0)
+    if wait_calls:
+        parts.append(
+            f"⚡ **Polling replacement:** {wait_calls} `wait_for_process` "
+            f"calls blocked for {blocked_s:.0f}s total → "
+            f"~{polls_saved} polls saved (vs. agent polling every 5s).\n"
+        )
+
+    # By-tool breakdown
+    parts.append("**By tool:**")
+    for entry in data.get("by_tool", [])[:20]:
+        tool = entry.get("tool", "?")
+        calls = entry.get("calls", 0)
+        f_count = entry.get("failures", 0)
+        p50 = entry.get("p50_ms", 0)
+        p95 = entry.get("p95_ms", 0)
+        warn = " ⚠️" if f_count > 0 and f_count >= calls * 0.5 else ""
+        parts.append(
+            f"- `{tool}` — {calls} calls ({f_count} failed) · "
+            f"p50={p50}ms p95={p95}ms{warn}"
+        )
+        if entry.get("errors_sampled"):
+            for e in entry["errors_sampled"][:2]:
+                parts.append(f"    error: {e[:140]}")
+
+    return "\n".join(parts)
+
+
+async def list_calls(
+    window_minutes: int | None = None,
+    tool: str | None = None,
+    only_failures: bool = False,
+    limit: int = 50,
+) -> str:
+    """Recent chimera MCP tool calls (newest first). Filter by tool name,
+    failure-only, time window."""
+    params = []
+    if window_minutes is not None:
+        params.append(f"window_minutes={window_minutes}")
+    if tool:
+        params.append(f"tool={urllib.parse.quote(tool)}")
+    if only_failures:
+        params.append("only_failures=true")
+    params.append(f"limit={limit}")
+    data = _get("/api/mcp-calls?" + "&".join(params))
+    if isinstance(data, str):
+        return data
+
+    calls = data.get("calls", [])
+    if not calls:
+        return "📭 No matching MCP calls."
+
+    parts = [f"**{len(calls)} most-recent call(s):**\n"]
+    for c in calls[:limit]:
+        ok = "✅" if c.get("success") else "❌"
+        ts = c.get("ts", "")
+        latency = c.get("elapsed_ms", 0)
+        tool = c.get("tool", "?")
+        size = c.get("output_size", 0)
+        line = f"{ok} `{tool}` ({latency}ms, {size}ch) — {ts}"
+        if c.get("error"):
+            line += f"\n    error: {c['error'][:160]}"
+        parts.append(line)
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Multi-session shared state — solves the "two parallel Claude Code sessions
 # can't see each other" problem. See chimera/monitor/sessions.py.
 # ---------------------------------------------------------------------------
