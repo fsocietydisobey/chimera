@@ -1502,6 +1502,163 @@ async def kill_process(label: str) -> str:
     return await _monitor_tools.kill_process(label)
 
 
+# ---------------------------------------------------------------------------
+# Multi-session shared state — externalize Claude Code session context so
+# parallel sessions can see what each other are doing without interrupting.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def session_log_decision(session_id: str, text: str, why: str = "") -> str:
+    """Record a decision the agent has made.
+
+    Surfaces to other sessions via `session_state(session_id)`. Call
+    this when you commit to an architectural choice / approach so
+    parallel sessions see what you've decided without needing access
+    to your conversation transcript.
+
+    Args:
+        session_id: this session's id.
+        text: the decision in 1-2 sentences.
+        why: optional rationale.
+    """
+    return await _monitor_tools.session_log_decision(session_id, text, why)
+
+
+@mcp.tool()
+async def session_log_touch(
+    session_id: str,
+    file: str,
+    summary: str = "",
+    line_start: int | None = None,
+    line_end: int | None = None,
+) -> str:
+    """Record a file modification.
+
+    Typically called automatically by a PostToolUse hook on Edit/Write/MultiEdit
+    — the file-touch log builds itself with zero agent burden. Manual calls
+    are useful when you've made changes outside those tools.
+
+    Args:
+        session_id: this session's id.
+        file: absolute or project-relative path.
+        summary: short description ("refactored auth gate", "added type hints").
+        line_start, line_end: optional line range.
+    """
+    return await _monitor_tools.session_log_touch(session_id, file, summary, line_start, line_end)
+
+
+@mcp.tool()
+async def session_log_question(session_id: str, text: str) -> str:
+    """Open a question for parallel sessions to answer.
+
+    Returns the question id — that's the handle other sessions use in
+    `session_post_answer`. Use this when you're working on something and
+    a related question comes up that you DON'T want to block on (e.g.
+    "should we use library X or Y?" — log it, keep going, another session
+    can research and answer).
+
+    Args:
+        session_id: this session's id.
+        text: the question.
+    """
+    return await _monitor_tools.session_log_question(session_id, text)
+
+
+@mcp.tool()
+async def session_set_status(session_id: str, status: str, detail: str = "") -> str:
+    """Update agent's high-level state — what kind of work is in flight?
+
+    Conventional values: 'researching', 'implementing', 'blocked',
+    'awaiting-review', 'idle'. Free-form OK; the dashboard renders whatever
+    you set.
+
+    Args:
+        session_id: this session's id.
+        status: short state label.
+        detail: optional context ("blocked on Q3", "implementing AMR router").
+    """
+    return await _monitor_tools.session_set_status(session_id, status, detail)
+
+
+@mcp.tool()
+async def session_post_answer(
+    target_session_id: str,
+    question_id: str,
+    answer: str,
+    from_session_id: str = "external",
+) -> str:
+    """**B → A write-back.** Answer another session's open question.
+
+    The target session's inbox is updated; on its next `session_pending_notes`
+    call (auto-triggered by SessionStart hook), it'll see your answer.
+    This is what makes parallel sessions actually collaborative — without
+    this tool, the design collapses to read-only ("B can see A but can't
+    help A").
+
+    Args:
+        target_session_id: the session that asked the question.
+        question_id: the id returned by `session_log_question`.
+        answer: your answer.
+        from_session_id: optional — your session id, for attribution.
+    """
+    return await _monitor_tools.session_post_answer(
+        target_session_id, question_id, answer, from_session_id,
+    )
+
+
+@mcp.tool()
+async def session_state(session_id: str, recent: int = 10) -> str:
+    """Full digest of a session's externalized state.
+
+    The 'side conversation' query: when another session is grinding on
+    something, call this to see its current status, decisions, file
+    touches, and open questions WITHOUT interrupting it. Then you can
+    answer its questions or work on related things knowing what it's
+    already done.
+
+    Args:
+        session_id: the session to inspect.
+        recent: how many recent entries per category (default 10).
+    """
+    return await _monitor_tools.session_state(session_id, recent)
+
+
+@mcp.tool()
+async def session_pending_notes(session_id: str, mark_read: bool = True) -> str:
+    """**Inbox read.** Get unread answers other sessions have posted to your
+    open questions.
+
+    Designed to be auto-called at SessionStart so unread cross-session
+    answers surface in your context without the user having to know to ask.
+
+    Args:
+        session_id: this session's id (the one reading its own inbox).
+        mark_read: if True (default), mark notes as read after returning.
+            Pass False to peek without consuming.
+    """
+    return await _monitor_tools.session_pending_notes(session_id, mark_read)
+
+
+@mcp.tool()
+async def session_recent_decisions(recent_per_session: int = 5) -> str:
+    """Recent decisions across ALL sessions. Cross-session view.
+
+    Useful when starting a new session — see what's been decided recently
+    in other parallel work so you don't redo or contradict it.
+
+    Args:
+        recent_per_session: max decisions to fetch per session (default 5).
+    """
+    return await _monitor_tools.session_recent_decisions(recent_per_session)
+
+
+@mcp.tool()
+async def session_list() -> str:
+    """List all tracked sessions — last activity, status, counts."""
+    return await _monitor_tools.session_list()
+
+
 def main():
     """Entry point — run the MCP server over stdio."""
     import atexit

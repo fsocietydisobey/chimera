@@ -1,0 +1,312 @@
+"""Multi-session shared state — externalize Claude Code session context.
+
+The problem: when one Claude Code session is grinding on a task, you can't
+ask related questions in another window without losing the working session's
+context. Forks (Agent tool) solve "background work" but not "side conversation
+that sees what the working agent is doing."
+
+The solution: each session writes its decisions, file-touches, status, and
+open questions to JSONL files chimera tracks. Other sessions query that
+state via MCP. Session B can post answers BACK to session A; A reads them
+automatically on its next turn (via SessionStart hook).
+
+Storage: ~/.local/state/chimera/sessions/<session_id>/
+  - decisions.jsonl       — append-only log of agent's recorded decisions
+  - files_touched.jsonl   — append-only log of file modifications
+  - questions.jsonl       — open questions (with answer field updated in-place)
+  - status.json           — current state ("researching"/"implementing"/"blocked")
+  - inbox.jsonl           — answers from other sessions to this session's questions
+
+Design notes (incorporated from review):
+  1. File-touch is automated via PostToolUse hook on Edit/Write/MultiEdit —
+     zero agent burden. Decisions/questions are nudged via periodic reminder
+     injection, NOT auto-extracted from prose (extraction unreliable).
+  2. Write-back is symmetric — `session_post_answer` (B→A) plus
+     `session_pending_notes` + auto-read on SessionStart hook (A reads).
+     Without these, the design collapses to "B reads A, human relays" which
+     only solves half the problem.
+  3. Inbox auto-read is critical. SessionStart calls session_pending_notes;
+     unread answers surface in A's system prompt. Agent sees "B answered Q3"
+     without the user having to know to ask.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from chimera.log import get_logger
+
+log = get_logger("monitor.sessions")
+
+_BASE_DIR = Path(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+) / "chimera" / "sessions"
+
+
+def _session_dir(session_id: str) -> Path:
+    """Resolve the per-session storage directory, creating it lazily."""
+    safe = session_id.replace("/", "_").replace("..", "_")
+    d = _BASE_DIR / safe
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Write side — called by the WORKING agent (session A) as it works
+# ---------------------------------------------------------------------------
+
+
+def log_decision(session_id: str, text: str, why: str = "") -> dict:
+    """Record a decision the agent has made. Surfaces to other sessions
+    via session_state(session_id)."""
+    record = {
+        "ts": _now_iso(),
+        "id": uuid.uuid4().hex[:12],
+        "text": text,
+        "why": why,
+    }
+    _append_jsonl(_session_dir(session_id) / "decisions.jsonl", record)
+    log.info("session %s: decision recorded — %s", session_id, text[:80])
+    return record
+
+
+def log_touch(
+    session_id: str,
+    file: str,
+    summary: str = "",
+    line_range: tuple[int, int] | None = None,
+) -> dict:
+    """Record a file modification. Typically called automatically from a
+    PostToolUse hook on Edit/Write/MultiEdit — agent doesn't have to remember.
+    """
+    record = {
+        "ts": _now_iso(),
+        "file": file,
+        "summary": summary,
+        "line_start": line_range[0] if line_range else None,
+        "line_end": line_range[1] if line_range else None,
+    }
+    _append_jsonl(_session_dir(session_id) / "files_touched.jsonl", record)
+    return record
+
+
+def log_question(session_id: str, text: str) -> dict:
+    """Open a question that another session can answer. Returns the question
+    record including its `id` — the handle B uses in `post_answer`."""
+    record = {
+        "ts": _now_iso(),
+        "id": uuid.uuid4().hex[:12],
+        "text": text,
+        "status": "open",      # "open" | "answered" | "withdrawn"
+        "answer": None,
+        "answered_by": None,
+        "answered_at": None,
+    }
+    _append_jsonl(_session_dir(session_id) / "questions.jsonl", record)
+    log.info("session %s: question opened (id=%s) — %s", session_id, record["id"], text[:80])
+    return record
+
+
+def set_status(session_id: str, status: str, detail: str = "") -> dict:
+    """Update the agent's high-level state. Other sessions see this in
+    session_state. Free-form string but conventional values: 'researching',
+    'implementing', 'blocked', 'awaiting-review', 'idle'.
+    """
+    path = _session_dir(session_id) / "status.json"
+    record = {"status": status, "detail": detail, "updated_at": _now_iso()}
+    path.write_text(json.dumps(record, indent=2))
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Cross-session — B writes back to A
+# ---------------------------------------------------------------------------
+
+
+def post_answer(
+    target_session_id: str,
+    question_id: str,
+    answer: str,
+    *,
+    from_session_id: str = "external",
+) -> dict:
+    """Session B answers session A's open question.
+
+    Updates the question's record in-place (status → answered) AND drops a
+    note in A's inbox. A's SessionStart hook calls session_pending_notes,
+    which reads the inbox and surfaces unread answers.
+    """
+    qpath = _session_dir(target_session_id) / "questions.jsonl"
+    questions = _read_jsonl(qpath)
+    matched: dict | None = None
+    rewritten: list[dict] = []
+    for q in questions:
+        if q.get("id") == question_id and q.get("status") == "open":
+            q["status"] = "answered"
+            q["answer"] = answer
+            q["answered_by"] = from_session_id
+            q["answered_at"] = _now_iso()
+            matched = q
+        rewritten.append(q)
+
+    if matched is None:
+        raise ValueError(
+            f"No open question with id={question_id!r} in session {target_session_id!r}. "
+            f"Was it already answered, or wrong id?"
+        )
+
+    # Atomic rewrite
+    tmp = qpath.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for q in rewritten:
+            f.write(json.dumps(q, separators=(",", ":")) + "\n")
+    tmp.replace(qpath)
+
+    # Drop a note in the inbox so A surfaces it on next read
+    note = {
+        "ts": _now_iso(),
+        "kind": "answer",
+        "question_id": question_id,
+        "question_text": matched.get("text", ""),
+        "answer": answer,
+        "from_session_id": from_session_id,
+        "read": False,
+    }
+    _append_jsonl(_session_dir(target_session_id) / "inbox.jsonl", note)
+    log.info(
+        "session %s: answer posted by %s for q=%s",
+        target_session_id, from_session_id, question_id,
+    )
+    return matched
+
+
+# ---------------------------------------------------------------------------
+# Read side — for B (querying A) and for A (reading its own inbox)
+# ---------------------------------------------------------------------------
+
+
+def state(session_id: str, recent: int = 10) -> dict:
+    """Full digest of session_id's externalized state. The 'what is session A
+    up to right now' query."""
+    d = _session_dir(session_id)
+    decisions = _read_jsonl(d / "decisions.jsonl")
+    files = _read_jsonl(d / "files_touched.jsonl")
+    questions = _read_jsonl(d / "questions.jsonl")
+    status_path = d / "status.json"
+    status = json.loads(status_path.read_text()) if status_path.exists() else None
+
+    return {
+        "session_id": session_id,
+        "status": status,
+        "recent_decisions": decisions[-recent:],
+        "decision_count": len(decisions),
+        "recent_files": files[-recent:],
+        "file_touch_count": len(files),
+        "open_questions": [q for q in questions if q.get("status") == "open"],
+        "answered_questions": [q for q in questions if q.get("status") == "answered"][-recent:],
+    }
+
+
+def recent_decisions(across_sessions: bool = True, recent_per_session: int = 5) -> list[dict]:
+    """Recent decisions across all sessions (or just the active ones)."""
+    if not _BASE_DIR.exists():
+        return []
+    out: list[dict] = []
+    for sd in _BASE_DIR.iterdir():
+        if not sd.is_dir():
+            continue
+        decisions = _read_jsonl(sd / "decisions.jsonl")[-recent_per_session:]
+        for d in decisions:
+            d["session_id"] = sd.name
+            out.append(d)
+    out.sort(key=lambda d: d.get("ts", ""), reverse=True)
+    return out
+
+
+def pending_notes(session_id: str, mark_read: bool = True) -> list[dict]:
+    """A reads its inbox — answers other sessions have posted that A hasn't seen.
+
+    Called automatically by A's SessionStart hook so unread answers surface
+    in A's system prompt without the user having to know to ask. Setting
+    mark_read=False allows debug/inspect without consuming the note.
+    """
+    inbox_path = _session_dir(session_id) / "inbox.jsonl"
+    notes = _read_jsonl(inbox_path)
+    pending = [n for n in notes if not n.get("read")]
+
+    if mark_read and pending:
+        # Mark read in-place + atomic rewrite
+        for n in notes:
+            if not n.get("read"):
+                n["read"] = True
+                n["read_at"] = _now_iso()
+        tmp = inbox_path.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for n in notes:
+                f.write(json.dumps(n, separators=(",", ":")) + "\n")
+        tmp.replace(inbox_path)
+
+    return pending
+
+
+def list_sessions() -> list[dict]:
+    """All sessions with their last-modified timestamp + summary counts."""
+    if not _BASE_DIR.exists():
+        return []
+    out: list[dict] = []
+    for sd in _BASE_DIR.iterdir():
+        if not sd.is_dir():
+            continue
+        last_mtime = max(
+            (p.stat().st_mtime for p in sd.iterdir() if p.is_file()),
+            default=0.0,
+        )
+        decisions = sum(1 for _ in (sd / "decisions.jsonl").open() if _.strip()) if (sd / "decisions.jsonl").exists() else 0
+        files = sum(1 for _ in (sd / "files_touched.jsonl").open() if _.strip()) if (sd / "files_touched.jsonl").exists() else 0
+        questions = _read_jsonl(sd / "questions.jsonl")
+        open_q = sum(1 for q in questions if q.get("status") == "open")
+        status_path = sd / "status.json"
+        status = json.loads(status_path.read_text()) if status_path.exists() else None
+
+        out.append({
+            "session_id": sd.name,
+            "last_active": last_mtime,
+            "last_active_age_s": time.time() - last_mtime if last_mtime else None,
+            "status": status,
+            "decision_count": decisions,
+            "file_touch_count": files,
+            "open_question_count": open_q,
+        })
+    out.sort(key=lambda r: r.get("last_active", 0), reverse=True)
+    return out

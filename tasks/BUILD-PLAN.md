@@ -195,28 +195,26 @@ need wiring in Phase 6+9.
 
 ---
 
-## Phase 11 — Multi-session shared state (Claude Code observability)
-
-The gap: when one Claude Code session is grinding on a task, you can't ask
-related questions in another window without losing the working session's
-context. Forks (Agent tool) solve "background work" but not "side conversation
-that sees what the working agent is doing." Chimera's already-existing
-state-watching daemon makes the externalized-state version of this tractable.
+## Phase 11 — Multi-session shared state ✅ DONE (backend; hooks deferred)
 
 | Item | Status | Where | Notes |
 |---|---|---|---|
-| `~/.local/state/chimera/sessions/<sid>/` JSONL store | ⬜ | new | decisions, files_touched, open_questions, status, **inbox** |
-| `mcp__chimera__session_log_decision(text, why)` | ⬜ | `server/tools/session_*.py` | A's write |
-| `mcp__chimera__session_log_question(text)` → returns question_id | ⬜ | | A's write — ID is the handle B uses to answer |
-| `mcp__chimera__session_status(state)` | ⬜ | | A's status update: researching/implementing/blocked |
-| **`mcp__chimera__session_post_answer(session_id, question_id, answer)`** | ⬜ | | **B → A write-back. Without this, B can only read A.** |
-| `mcp__chimera__session_state(session_id)` | ⬜ | | B's read — full digest |
-| `mcp__chimera__session_recent_decisions()` | ⬜ | | B's read across all sessions |
-| **`mcp__chimera__session_pending_notes(session_id)`** | ⬜ | | **A's inbox read — answers B has posted that A hasn't seen** |
-| **PostToolUse hook → auto session_log_touch** | ⬜ | `~/.claude/hooks/` | **Free file-touch logging. Highest-leverage automation: agent burden = 0, log is always-correct.** Diff-parses Edit/Write/MultiEdit tool params. |
-| **Periodic `<chimera:reminder>` injection** | ⬜ | UserPromptSubmit hook every N turns | Nudges agent to log decisions/questions. NOT auto-extracted from prose — extraction unreliable. |
-| **SessionStart hook → call session_pending_notes** | ⬜ | `~/.claude/hooks/` | When A wakes up, surfaces "B answered Q3 while you were running" without user having to ask. Closes the inbox-read loop. |
-| `/api/sessions` endpoint | ⬜ | `monitor/api/sessions.py` | dashboard view: all active sessions, their state, pending answers |
+| JSONL session store at `~/.local/state/chimera/sessions/<sid>/` | ✅ | `monitor/sessions.py` | decisions, files_touched, questions (in-place updates), status, **inbox** |
+| `mcp__chimera__session_log_decision(text, why)` | ✅ | A's write |
+| `mcp__chimera__session_log_question(text)` → returns question_id | ✅ | A's write |
+| `mcp__chimera__session_log_touch(file, summary, line_range)` | ✅ | A's write |
+| `mcp__chimera__session_set_status(state, detail)` | ✅ | A's status update |
+| **`mcp__chimera__session_post_answer(target_session_id, question_id, answer)`** | ✅ | **B → A write-back: updates question status + drops inbox note** |
+| `mcp__chimera__session_state(session_id)` | ✅ | B's read — full digest |
+| `mcp__chimera__session_recent_decisions()` | ✅ | B's read across all sessions |
+| `mcp__chimera__session_list()` | ✅ | B's read — sessions index |
+| **`mcp__chimera__session_pending_notes(session_id, mark_read)`** | ✅ | **A's inbox read — answers B has posted, auto-marks read** |
+| `/api/sessions/*` REST endpoints | ✅ | `monitor/api/sessions.py` | dashboard data |
+| Smoke test verified: bidirectional flow A ↔ B ↔ A | ✅ | | |
+| **PostToolUse hook → auto session_log_touch** | ⬜ | deferred | `~/.claude/hooks/` script — agent-side automation |
+| **Periodic `<chimera:reminder>` injection** | ⬜ | deferred | UserPromptSubmit hook for decisions/questions nudge |
+| **SessionStart hook → call session_pending_notes** | ⬜ | deferred | auto-surface unread answers in next turn's context |
+| Dashboard panel: live sessions view | ⬜ | deferred | `apps/monitor-ui/src/components/sessions/` |
 
 **Critical design notes (incorporated from review):**
 

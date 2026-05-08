@@ -544,3 +544,229 @@ def _tail(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return f"... [{len(text) - max_chars} chars truncated] ...\n" + text[-max_chars:]
+
+
+# ---------------------------------------------------------------------------
+# Multi-session shared state — solves the "two parallel Claude Code sessions
+# can't see each other" problem. See chimera/monitor/sessions.py.
+# ---------------------------------------------------------------------------
+
+
+async def session_log_decision(session_id: str, text: str, why: str = "") -> str:
+    """Record a decision (for the working agent — session A's write)."""
+    data = _post(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/decision",
+        {"text": text, "why": why},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return f"📝 logged decision (id={data['id']}): {text[:120]}"
+
+
+async def session_log_touch(
+    session_id: str,
+    file: str,
+    summary: str = "",
+    line_start: int | None = None,
+    line_end: int | None = None,
+) -> str:
+    """Record a file modification. Typically called from a PostToolUse hook
+    on Edit/Write/MultiEdit — agent doesn't have to remember manually."""
+    data = _post(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/touch",
+        {"file": file, "summary": summary, "line_start": line_start, "line_end": line_end},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return f"📂 touch logged: {file}"
+
+
+async def session_log_question(session_id: str, text: str) -> str:
+    """Open a question other sessions can answer. Returns the question id —
+    that's the handle other sessions use in `session_post_answer`."""
+    data = _post(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/question",
+        {"text": text},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return (
+        f"❓ question opened (id={data['id']}): {text[:120]}\n"
+        f"Other sessions can answer with `session_post_answer(target_session_id='{session_id}', "
+        f"question_id='{data['id']}', answer='...')`"
+    )
+
+
+async def session_set_status(session_id: str, status: str, detail: str = "") -> str:
+    """Update agent's high-level state. Conventional values:
+    'researching', 'implementing', 'blocked', 'awaiting-review', 'idle'."""
+    data = _post(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/status",
+        {"status": status, "detail": detail},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return f"🟢 status updated: {status}{(' — ' + detail) if detail else ''}"
+
+
+async def session_post_answer(
+    target_session_id: str,
+    question_id: str,
+    answer: str,
+    from_session_id: str = "external",
+) -> str:
+    """Session B answers session A's open question.
+
+    Updates the question's status + drops a note in A's inbox. A's
+    SessionStart hook (which calls `session_pending_notes`) surfaces the
+    answer next time A wakes up.
+    """
+    data = _post(
+        f"/api/sessions/{urllib.parse.quote(target_session_id)}/answer",
+        {"question_id": question_id, "answer": answer, "from_session_id": from_session_id},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return (
+        f"📨 answer posted to session {target_session_id} for question {question_id}\n"
+        f"Q: {data.get('text', '')[:120]}\nA: {answer[:200]}"
+    )
+
+
+async def session_state(session_id: str, recent: int = 10) -> str:
+    """Full digest of a session — what is session A currently working on?
+
+    The 'side conversation' query: B calls this to see A's status,
+    decisions, file touches, open questions WITHOUT interrupting A.
+    """
+    data = _get(
+        f"/api/sessions/{urllib.parse.quote(session_id)}?recent={recent}",
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+
+    parts = [f"**session `{session_id}`**"]
+
+    status = data.get("status")
+    if status:
+        parts.append(
+            f"status: **{status['status']}**"
+            + (f" — {status['detail']}" if status.get("detail") else "")
+            + f" (updated {status.get('updated_at', '?')})"
+        )
+
+    parts.append(
+        f"decisions: {data.get('decision_count', 0)} total, "
+        f"files touched: {data.get('file_touch_count', 0)}, "
+        f"open questions: {len(data.get('open_questions', []))}"
+    )
+
+    if data.get("recent_decisions"):
+        parts.append("\n**Recent decisions:**")
+        for d in data["recent_decisions"][-5:]:
+            why = f" — {d.get('why')}" if d.get("why") else ""
+            parts.append(f"- {d.get('text', '')[:160]}{why}")
+
+    if data.get("open_questions"):
+        parts.append("\n**Open questions:**")
+        for q in data["open_questions"]:
+            parts.append(f"- (id={q['id']}) {q.get('text', '')[:160]}")
+
+    if data.get("recent_files"):
+        parts.append("\n**Recent file touches:**")
+        for f in data["recent_files"][-5:]:
+            range_str = (
+                f":{f['line_start']}-{f['line_end']}"
+                if f.get("line_start") and f.get("line_end")
+                else ""
+            )
+            parts.append(f"- {f.get('file', '')}{range_str} — {f.get('summary', '')[:100]}")
+
+    return "\n".join(parts)
+
+
+async def session_pending_notes(session_id: str, mark_read: bool = True) -> str:
+    """**A's inbox read.** Fetch unread answers other sessions have posted
+    to this session's questions.
+
+    Call automatically at SessionStart so the working agent sees "session B
+    answered Q3 while you were running" without the user having to know to ask.
+
+    Args:
+        session_id: this session's id (the one reading its inbox).
+        mark_read: if True (default), mark notes as read after returning them.
+            Pass False to peek without consuming.
+    """
+    data = _get(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/pending"
+        f"?mark_read={'true' if mark_read else 'false'}",
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+
+    notes = data.get("notes", [])
+    if not notes:
+        return "📭 No pending notes — your inbox is empty."
+
+    parts = [f"📬 **{len(notes)} pending note(s):**\n"]
+    for n in notes:
+        parts.append(
+            f"- ({n.get('kind')}) Q={n.get('question_text', '')[:120]}\n"
+            f"  ➜ {n.get('answer', '')[:300]}\n"
+            f"  from: {n.get('from_session_id')}, ts: {n.get('ts')}"
+        )
+    return "\n".join(parts)
+
+
+async def session_recent_decisions(recent_per_session: int = 5) -> str:
+    """Recent decisions across ALL active sessions. Cross-session view."""
+    data = _get(
+        f"/api/sessions/recent_decisions?recent_per_session={recent_per_session}",
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+
+    decisions = data.get("decisions", [])
+    if not decisions:
+        return "No recorded decisions yet across any session."
+
+    parts = [f"**{len(decisions)} recent decision(s):**\n"]
+    for d in decisions[:30]:
+        parts.append(
+            f"- ({d.get('session_id')}, {d.get('ts')}): "
+            f"{d.get('text', '')[:180]}"
+        )
+    return "\n".join(parts)
+
+
+async def session_list() -> str:
+    """All known sessions + their freshness, status, counts."""
+    data = _get("/api/sessions", timeout=10.0)
+    if isinstance(data, str):
+        return data
+
+    sessions = data.get("sessions", [])
+    if not sessions:
+        return "No sessions tracked yet. Sessions are auto-created on first log call."
+
+    parts = [f"**{len(sessions)} session(s):**\n"]
+    for s in sessions:
+        status = s.get("status", {}) or {}
+        age_s = s.get("last_active_age_s") or 0
+        age_str = f"{age_s/60:.0f}m ago" if age_s < 3600 else f"{age_s/3600:.1f}h ago"
+        parts.append(
+            f"- `{s['session_id']}` "
+            f"({status.get('status', '?')}) — "
+            f"last active {age_str}, "
+            f"decisions={s.get('decision_count', 0)}, "
+            f"open_q={s.get('open_question_count', 0)}"
+        )
+    return "\n".join(parts)

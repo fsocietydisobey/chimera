@@ -73,6 +73,7 @@ def build_app():
     from .api import processes as processes_api
     from .api import projects as projects_api
     from .api import schema_drift as drift_api
+    from .api import sessions as sessions_api
     from .api import threads as threads_api
     from .api import topology as topology_api
     from .api import usage as usage_api
@@ -86,6 +87,7 @@ def build_app():
     app.include_router(anomalies_api.build_router(), prefix="/api")
     app.include_router(usage_api.build_router(), prefix="/api")
     app.include_router(processes_api.build_router(), prefix="/api")
+    app.include_router(sessions_api.build_router(), prefix="/api")
 
     # Auto-scan: kick off background metadata enrichment for any project
     # whose cache is missing or stale. The worker drains serially so we
