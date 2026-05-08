@@ -89,33 +89,35 @@ The only place chimera talks to LLMs. No API SDK calls anywhere else.
 
 ---
 
-## Phase 4 — Context Resolver (Pillar 1)
+## Phase 4 — Context Resolver (Pillar 1) ✅ DONE (with fallbacks)
 
 | Item | Status | Where | Notes |
 |---|---|---|---|
-| `resolver.py` | ⬜ | `context/resolver.py` | primitive: `resolve_context(task) → ContextBundle` |
-| `relevance.py` | ⬜ | `context/relevance.py` | merge Séance + Scarlet + Serena scores |
-| `budget.py` | ⬜ | `context/budget.py` | per-task token budget enforcement |
-| `cache.py` | ⬜ | `context/cache.py` | memoize per (project, task-hash) |
-| Séance library API | ⬜ | `packages/seance/src/seance/api/` | will use grep-fallback initially |
-| Scarlet library API | ⬜ | `packages/scarlet/src/scarlet/api/` | will read existing CLAUDE.md initially |
-| `seance_client.py` | ⬜ | `tools/seance_client.py` | `from seance.api import semantic_search` |
-| `scarlet_client.py` | ⬜ | `tools/scarlet_client.py` | |
+| `resolve_context(task)` primitive | ✅ | `context/resolver.py` | Always returns a ContextBundle, even with no perception tools installed |
+| Séance source (semantic search) | 🟡 | inline | Tries `from seance.api.search import semantic_search`; falls back when unavailable |
+| Scarlet source (cartography) | 🟡 | inline | Tries `from scarlet.api.feature_metadata import scan_features`; reads existing CLAUDE.md files when unavailable |
+| Grep source (keyword fallback) | ✅ | inline | Always available; ripgrep when on PATH |
+| Filesystem source (recently modified) | ✅ | inline | Files modified in last 7 days, decaying score |
+| Score merge + budget truncation | ✅ | inline | Multi-source bonus, sort by relevance, cap at max_files + budget_chars |
+| Verified end-to-end | ✅ | | 383ms / 8 files / multi-source merge working |
+| **Séance library API** | ⬜ | `packages/seance/src/seance/api/` | Hooks in transparently when added (resolver tries import; falls back gracefully) |
+| **Scarlet library API** | ⬜ | `packages/scarlet/src/scarlet/api/` | Same pattern — drop in, no resolver change needed |
 
 ---
 
-## Phase 5 — Runtime Manager (Pillar 2)
+## Phase 5 — Runtime Manager (Pillar 2) ✅ DONE (core)
 
 | Item | Status | Where | Notes |
 |---|---|---|---|
-| `chimera dev` command | ⬜ | `cli/dev.py` | one-command stack startup |
-| `lifecycle.py` | ⬜ | `runtime/lifecycle.py` | start/stop everything |
-| `dev_server.py` | ⬜ | `runtime/dev_server.py` | npm/pnpm/uv detection |
-| `browser.py` | ⬜ | `runtime/browser.py` | Chrome `--remote-debugging-port` |
-| `postgres.py` | ⬜ | `runtime/postgres.py` | discover + connect project DB |
-| `logs.py` | ⬜ | `runtime/logs.py` | aggregate stdout/stderr |
-| `healthcheck.py` | ⬜ | `runtime/healthcheck.py` | readiness probes |
-| Specter integration | ⬜ | hooked from `runtime/browser.py` | |
+| `chimera dev <project>` | ✅ | `cli/dev.py` | full lifecycle: detect → spawn → wait-ready → launch browser → wait-for-SIGINT → tear-down |
+| `dev_server.detect()` | ✅ | `runtime/dev_server.py` | npm/pnpm/yarn/bun + uvicorn + django + manage.py heuristics |
+| `browser.find_chrome()` + `build_launch_cmd()` | ✅ | `runtime/browser.py` | platform-aware Chrome detection, dedicated user-data-dir, free-port picker |
+| Process registry integration | ✅ | uses Phase 12 | every spawn tracked; SIGINT walks reverse spawn order to kill |
+| Auto-start chimera-monitor | ✅ | `_ensure_monitor()` | probes /api/projects, starts daemon if down |
+| Wait-for-ready via wait_for_process | ✅ | uses Phase 12 | uses framework-specific URL pattern (Vite "Local: ...", Django "Starting...") |
+| `runtime/postgres.py` | ⬜ | deferred | DB connect/teardown — projects can connect manually for now |
+| `runtime/healthcheck.py` | ⬜ | deferred | explicit readiness probes — wait_for_process covers most cases |
+| Specter integration (browser auto-attach) | 🟡 | partial | Chrome launches with `--remote-debugging-port`; Specter package can `connect_to_tab` to it |
 
 ---
 

@@ -20,7 +20,7 @@ import sys
 
 from chimera import __version__
 
-from . import doctor, mcp_serve, monitor, route, task
+from . import dev, doctor, mcp_serve, monitor, route, task
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     task.add_subparser(subparsers)
     route.add_subparser(subparsers)
+    dev.add_subparser(subparsers)
     doctor.add_subparser(subparsers)
     monitor.add_subparser(subparsers)
     mcp_serve.add_subparser(subparsers)
