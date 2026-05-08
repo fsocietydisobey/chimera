@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""chimera SessionStart hook — surface unread inbox notes from other sessions.
+"""chimera SessionStart hook — surface unread inbox + other active sessions.
 
-Runs at Claude Code session boot (startup, resume, clear). Reads this
-session's inbox.jsonl, marks unread notes as read, emits a JSON output
-that Claude Code injects into the model's context for the next turn.
+Runs at Claude Code session boot (startup, resume, clear). Two jobs:
 
-If inbox is empty / file missing / any error: exit 0 silently with no output.
+  1. Read THIS session's inbox.jsonl → mark unread notes read → format them
+     into the model's context. Closes the multi-session loop: when window B
+     posts an answer to window A's question, window A sees it on next start.
+
+  2. Discover OTHER recently-active sessions (excluding this one). Surface
+     them in the context block too so the agent automatically knows about
+     parallel work without the user having to know to ask. Without this,
+     the user has to explicitly say "what's my other session doing?" — with
+     it, window B sees "📋 session A is active, status=implementing" the
+     moment it boots.
+
+If both inbox AND no-other-sessions: exit 0 silently with no output.
 """
 
 from __future__ import annotations
@@ -97,6 +106,108 @@ def _format_inbox(notes: list[dict]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _discover_other_active_sessions(
+    self_session_id: str,
+    *,
+    within_minutes: int = 30,
+) -> list[dict]:
+    """Walk ~/.local/state/chimera/sessions/ and return other sessions
+    that have been active within the window. Sorted newest-first.
+
+    Reads each session's status.json + checks files_touched.jsonl mtime.
+    Skips this session and any with no activity in the window.
+    """
+    import time
+
+    if not _BASE_DIR.exists():
+        return []
+
+    cutoff = time.time() - within_minutes * 60
+    out: list[dict] = []
+
+    for d in _BASE_DIR.iterdir():
+        if not d.is_dir() or d.name == self_session_id:
+            continue
+
+        # Most-recent activity = newest mtime among the session's files
+        latest_mtime = 0.0
+        for p in d.iterdir():
+            if not p.is_file():
+                continue
+            try:
+                m = p.stat().st_mtime
+                if m > latest_mtime:
+                    latest_mtime = m
+            except OSError:
+                continue
+
+        if latest_mtime < cutoff:
+            continue
+
+        # Read status.json (best-effort)
+        status_path = d / "status.json"
+        status: dict | None = None
+        if status_path.is_file():
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                status = None
+
+        # Cheap counts
+        decisions = _read_jsonl(d / "decisions.jsonl")
+        files = _read_jsonl(d / "files_touched.jsonl")
+        questions = _read_jsonl(d / "questions.jsonl")
+        open_q = sum(1 for q in questions if q.get("status") == "open")
+
+        out.append({
+            "session_id": d.name,
+            "last_active_age_s": int(time.time() - latest_mtime),
+            "status": status,
+            "decision_count": len(decisions),
+            "file_touch_count": len(files),
+            "open_question_count": open_q,
+        })
+
+    out.sort(key=lambda r: r.get("last_active_age_s", 0))
+    return out
+
+
+def _format_active_sessions(sessions: list[dict]) -> str:
+    """Render the 'other sessions currently active' block."""
+    lines = [
+        f"📋 chimera — {len(sessions)} other session(s) active in the last 30 min:",
+        "",
+    ]
+    for s in sessions:
+        sid = s.get("session_id", "?")
+        status = s.get("status") or {}
+        status_label = status.get("status", "?")
+        detail = status.get("detail", "")
+        age_s = s.get("last_active_age_s", 0)
+        age_str = f"{age_s // 60}m ago" if age_s >= 60 else f"{age_s}s ago"
+        decisions = s.get("decision_count", 0)
+        touches = s.get("file_touch_count", 0)
+        open_q = s.get("open_question_count", 0)
+
+        lines.append(
+            f"- `{sid}` (status: {status_label}{', ' + detail if detail else ''})"
+        )
+        lines.append(
+            f"  last active {age_str} · {decisions} decisions · "
+            f"{touches} file touches · {open_q} open question(s)"
+        )
+        lines.append(
+            f"  → use session_state(\"{sid}\") to read details"
+        )
+        lines.append("")
+    lines.append(
+        "If a question/idea you have relates to one of these sessions, you can:\n"
+        "  - Read its state with `session_state(...)` — see what it's up to without interrupting\n"
+        "  - Answer one of its open questions with `session_post_answer(...)` — its inbox surfaces it on next turn"
+    )
+    return "\n".join(lines).rstrip()
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read()
@@ -110,16 +221,24 @@ def main() -> int:
     if not session_id:
         return 0
 
+    # Two parallel jobs: (1) read this session's inbox, (2) discover other
+    # active sessions. Either may produce output; we concatenate when both do.
     notes = _consume_inbox(session_id)
-    if not notes:
+    others = _discover_other_active_sessions(session_id, within_minutes=30)
+
+    blocks: list[str] = []
+    if notes:
+        blocks.append(_format_inbox(notes))
+    if others:
+        blocks.append(_format_active_sessions(others))
+
+    if not blocks:
         return 0
 
-    # Claude Code's SessionStart hook reads JSON from stdout. The
-    # `additionalContext` field gets injected into the model's context.
     output = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": _format_inbox(notes),
+            "additionalContext": "\n\n---\n\n".join(blocks),
         }
     }
     sys.stdout.write(json.dumps(output))
