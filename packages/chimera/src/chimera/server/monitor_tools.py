@@ -702,21 +702,71 @@ async def session_log_touch(
     return f"📂 touch logged: {file}"
 
 
-async def session_log_question(session_id: str, text: str) -> str:
+async def session_log_question(
+    session_id: str,
+    text: str,
+    target_session_id: str | None = None,
+) -> str:
     """Open a question other sessions can answer. Returns the question id —
-    that's the handle other sessions use in `session_post_answer`."""
+    that's the handle other sessions use in `session_post_answer`.
+
+    If `target_session_id` is provided, the question is *targeted* at that
+    session — the target's UserPromptSubmit hook will surface it as an
+    incoming question on its next turn (via the /incoming endpoint),
+    without requiring the target to poll session_state. Accepts a UUID
+    or a friendly name.
+
+    If `target_session_id` is None, the question is broadcast — visible
+    only to sessions that explicitly read this session's session_state.
+    Use targeted questions for direct asks; broadcast for "anyone with
+    context can chime in."
+    """
+    body: dict[str, Any] = {"text": text}
+    if target_session_id:
+        body["target_session_id"] = target_session_id
     data = _post(
         f"/api/sessions/{urllib.parse.quote(session_id)}/question",
-        {"text": text},
+        body,
         timeout=10.0,
     )
     if isinstance(data, str):
         return data
+    target_note = (
+        f" (targeted at {target_session_id})" if target_session_id else ""
+    )
     return (
-        f"❓ question opened (id={data['id']}): {text[:120]}\n"
+        f"❓ question opened (id={data['id']}){target_note}: {text[:120]}\n"
         f"Other sessions can answer with `session_post_answer(target_session_id='{session_id}', "
         f"question_id='{data['id']}', answer='...')`"
     )
+
+
+async def session_incoming_questions(session_id: str) -> str:
+    """Open questions from OTHER sessions targeted at this one.
+
+    Symmetric counterpart to `session_pending_notes`: pending shows
+    answers to questions THIS session asked; incoming shows questions
+    OTHER sessions asked specifically targeting THIS session. Closes the
+    "their inbox is empty" gap from before targeted questions existed.
+    """
+    data = _get(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/incoming",
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    questions = data.get("questions", [])
+    if not questions:
+        return "📨 no incoming questions"
+    lines = [f"📨 **{len(questions)} incoming question(s) from other sessions:**\n"]
+    for q in questions:
+        from_sid = (q.get("from_session_id") or "")[:8] or "external"
+        lines.append(f"- (q={q['id']}) from {from_sid}: {q.get('text', '')[:300]}")
+        lines.append(
+            f"  ➜ answer with `session_post_answer(target_session_id='{q.get('from_session_id')}', "
+            f"question_id='{q['id']}', answer='...')`"
+        )
+    return "\n".join(lines)
 
 
 async def session_set_status(session_id: str, status: str, detail: str = "") -> str:

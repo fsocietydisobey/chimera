@@ -121,9 +121,36 @@ def log_touch(
     return record
 
 
-def log_question(session_id: str, text: str) -> dict:
-    """Open a question that another session can answer. Returns the question
-    record including its `id` — the handle B uses in `post_answer`."""
+def log_question(
+    session_id: str,
+    text: str,
+    target_session_id: str | None = None,
+) -> dict:
+    """Open a question that another session can answer.
+
+    Returns the question record including its `id` — the handle B uses in
+    `post_answer`.
+
+    If `target_session_id` is provided, the question is *targeted* — the
+    target session's UserPromptSubmit hook will surface it as an incoming
+    question on its next turn, without requiring the target to poll
+    session_state. Accepts either a UUID or a friendly name; resolved to
+    UUID at write time so subsequent name changes don't orphan the link.
+
+    If `target_session_id` is None, the question is "broadcast" — visible
+    only to sessions that explicitly inspect session_state(this_session).
+    """
+    resolved_target: str | None = None
+    if target_session_id:
+        try:
+            resolved_target = resolve_session_id(target_session_id)
+        except ValueError:
+            # Unresolvable target — log it as the literal value rather than
+            # erroring; the target may not exist yet, and hooks should still
+            # render the question on its session_state. Better than refusing
+            # to log.
+            resolved_target = target_session_id
+
     record = {
         "ts": _now_iso(),
         "id": uuid.uuid4().hex[:12],
@@ -132,9 +159,13 @@ def log_question(session_id: str, text: str) -> dict:
         "answer": None,
         "answered_by": None,
         "answered_at": None,
+        "target_session_id": resolved_target,  # None == broadcast
     }
     _append_jsonl(_session_dir(session_id) / "questions.jsonl", record)
-    log.info("session %s: question opened (id=%s) — %s", session_id, record["id"], text[:80])
+    log.info(
+        "session %s: question opened (id=%s, target=%s) — %s",
+        session_id, record["id"], resolved_target or "broadcast", text[:80],
+    )
     return record
 
 
@@ -376,6 +407,51 @@ def pending_notes(session_id: str, mark_read: bool = True) -> list[dict]:
         tmp.replace(inbox_path)
 
     return pending
+
+
+def incoming_questions(session_id: str) -> list[dict]:
+    """Open questions on OTHER sessions that target this session.
+
+    Symmetric counterpart to pending_notes. The chimera multi-session
+    model originally only had two write paths — A logs a question (broadcast,
+    no target) and B answers it (lands in A's inbox). To ASK B a question,
+    A had to log a question on A's session and rely on B polling A's
+    session_state — a discipline-dependent step that produced "their inbox
+    is empty" confusion (B looking for incoming questions in their own
+    inbox, finding nothing because A's question lives on A's session).
+
+    This function closes the loop: it scans all sessions' questions.jsonl
+    files for OPEN questions where target_session_id == this session, and
+    returns them with the asking-session id attached. The UserPromptSubmit
+    hook fetches this and injects it alongside the inbox so B sees A's
+    targeted question on B's next turn without poll-the-other-session
+    discipline.
+
+    `session_id` accepts either a UUID or a friendly name. Resolves to
+    UUID before scanning so name-changes after the question was logged
+    still match.
+    """
+    session_id = resolve_session_id(session_id)
+    if not _BASE_DIR.exists():
+        return []
+    out: list[dict] = []
+    for sd in _BASE_DIR.iterdir():
+        if not sd.is_dir():
+            continue
+        if sd.name == session_id:
+            continue  # don't surface our own questions to ourselves
+        questions = _read_jsonl(sd / "questions.jsonl")
+        for q in questions:
+            if q.get("status") != "open":
+                continue
+            if q.get("target_session_id") != session_id:
+                continue
+            out.append({
+                **q,
+                "from_session_id": sd.name,
+            })
+    out.sort(key=lambda q: q.get("ts", ""), reverse=True)
+    return out
 
 
 def list_sessions() -> list[dict]:

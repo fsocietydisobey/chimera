@@ -78,23 +78,68 @@ def _fetch_pending_notes(session_id: str) -> list[dict]:
         return []
 
 
+def _fetch_incoming_questions(session_id: str) -> list[dict]:
+    """Hit /api/sessions/{sid}/incoming; return questions or [] on failure.
+
+    Returns OPEN questions from OTHER sessions that target this session
+    (target_session_id == this session). These re-surface every turn until
+    answered — that's intentional. Unlike inbox notes, an unanswered
+    incoming question is still actionable, so we want it visible until
+    handled.
+    """
+    url = f"{_ENDPOINT}/api/sessions/{session_id}/incoming"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=_INBOX_TIMEOUT_S) as resp:
+            payload = json.loads(resp.read())
+        questions = payload.get("questions", [])
+        return questions if isinstance(questions, list) else []
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return []
+
+
 def _format_inbox(notes: list[dict]) -> str:
     """Render notes as compact context block. Truncates long bodies."""
     lines = [f"📬 chimera inbox: {len(notes)} new note(s) from other sessions:"]
     for n in notes:
         kind = n.get("kind") or "note"
         from_sid = (n.get("from_session_id") or "")[:8] or "external"
-        text = (n.get("text") or "").strip()
-        if len(text) > 600:
-            text = text[:600] + "…"
+        # 'answer' notes have answer text in `answer` field, not `text`.
+        # Decisions/touches (future) would use `text`.
+        body = (n.get("answer") or n.get("text") or "").strip()
+        if len(body) > 600:
+            body = body[:600] + "…"
         question_text = (n.get("question_text") or "").strip()
         if question_text and len(question_text) > 200:
             question_text = question_text[:200] + "…"
         lines.append(f"  • [{kind} from {from_sid}]")
         if question_text:
             lines.append(f"    re Q: {question_text}")
-        lines.append(f"    {text}")
+        lines.append(f"    {body}")
     lines.append("(auto-read; no need to call session_pending_notes for these)")
+    return "\n".join(lines)
+
+
+def _format_incoming(questions: list[dict], my_session_id: str) -> str:
+    """Render incoming questions targeting this session as a context block.
+
+    Re-surfaces every turn until the question is answered or withdrawn.
+    Includes the answer-back snippet so the agent can respond inline.
+    """
+    lines = [f"📨 chimera incoming: {len(questions)} open question(s) targeting you:"]
+    for q in questions:
+        from_sid = (q.get("from_session_id") or "")[:8] or "external"
+        qid = q.get("id", "?")
+        text = (q.get("text") or "").strip()
+        if len(text) > 700:
+            text = text[:700] + "…"
+        lines.append(f"  • [Q={qid} from {from_sid}]")
+        lines.append(f"    {text}")
+        lines.append(
+            f"    ➜ answer with `session_post_answer(target_session_id="
+            f"\"{q.get('from_session_id')}\", question_id=\"{qid}\", answer=\"...\")`"
+        )
+    lines.append("(re-surfaces every turn until answered; address or withdraw to clear)")
     return "\n".join(lines)
 
 
@@ -117,6 +162,14 @@ def main() -> int:
     if notes:
         inbox_block = _format_inbox(notes)
 
+    # --- Incoming questions targeting this session (every turn) -----------
+    # Re-fetched each turn (no mark-read concept) — open questions stay
+    # visible until answered/withdrawn.
+    incoming_block = ""
+    incoming = _fetch_incoming_questions(session_id)
+    if incoming:
+        incoming_block = _format_incoming(incoming, session_id)
+
     # --- Periodic decision/question reminder (every Nth turn) -------------
     safe = session_id.replace("/", "_").replace("..", "_")
     counter_file = _COUNTER_DIR / f"{safe}.count"
@@ -133,10 +186,12 @@ def main() -> int:
             "Skip if nothing to log."
         )
 
-    if not inbox_block and not reminder_block:
+    if not inbox_block and not incoming_block and not reminder_block:
         return 0
 
-    additional_context = "\n\n".join(b for b in (inbox_block, reminder_block) if b)
+    additional_context = "\n\n".join(
+        b for b in (inbox_block, incoming_block, reminder_block) if b
+    )
 
     output = {
         "hookSpecificOutput": {

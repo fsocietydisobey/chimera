@@ -37,6 +37,7 @@ class TouchReq(BaseModel):
 
 class QuestionReq(BaseModel):
     text: str
+    target_session_id: str | None = None
 
 
 class StatusReq(BaseModel):
@@ -90,7 +91,21 @@ def build_router():
 
     @router.post("/sessions/{session_id}/question")
     async def post_question(session_id: str, req: QuestionReq) -> dict:
-        return sessions.log_question(session_id, req.text)
+        return sessions.log_question(
+            session_id,
+            req.text,
+            target_session_id=req.target_session_id,
+        )
+
+    @router.get("/sessions/{session_id}/incoming")
+    async def get_incoming(session_id: str) -> dict:
+        """Open questions from OTHER sessions targeted at this one.
+
+        Symmetric counterpart to /pending — pending shows answers to
+        questions THIS session asked; /incoming shows questions OTHER
+        sessions asked targeting THIS session.
+        """
+        return {"questions": sessions.incoming_questions(session_id)}
 
     @router.post("/sessions/{session_id}/status")
     async def post_status(session_id: str, req: StatusReq) -> dict:

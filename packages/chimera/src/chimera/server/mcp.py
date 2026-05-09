@@ -1590,20 +1590,72 @@ async def session_log_touch(
 
 @mcp.tool()
 @logged_tool("session_log_question")
-async def session_log_question(session_id: str, text: str) -> str:
+async def session_log_question(
+    session_id: str,
+    text: str,
+    target_session_id: str | None = None,
+) -> str:
     """Open a question for parallel sessions to answer.
 
+    **DEFAULT TO ACTION, NOT DELEGATION.** Before logging a question,
+    ask yourself: "Can I decide and proceed?" If yes, do that. Cross-
+    session ping-pong (asking, waiting, asking again) is usually worse
+    than making a reasonable call and moving forward. Log a question
+    ONLY when:
+      • Another session owns the relevant code/domain and you'd
+        otherwise duplicate or conflict with their in-flight work
+      • You're genuinely blocked on a fact you can't determine yourself
+      • A decision needs the user's input and they've routed it to a
+        specific other session
+
+    Bad uses (these should be decisions, not questions):
+      ✗ "Should I use approach A or B?" — pick one, document why,
+        proceed. Reverse if wrong.
+      ✗ "Want me to do X or Y?" routed to a peer session — peer can't
+        consent for the user; either ask the user directly or just pick.
+      ✗ "Confirming you're OK with my plan" — if your plan is sound,
+        stop checking; ship it.
+
     Returns the question id — that's the handle other sessions use in
-    `session_post_answer`. Use this when you're working on something and
-    a related question comes up that you DON'T want to block on (e.g.
-    "should we use library X or Y?" — log it, keep going, another session
-    can research and answer).
+    `session_post_answer`.
+
+    If `target_session_id` is provided, the question is **targeted** at
+    that session — it will surface in their UserPromptSubmit hook context
+    on their next turn (via the /incoming endpoint), without requiring
+    them to poll session_state. Accepts a UUID or a friendly name.
+
+    If `target_session_id` is None, the question is **broadcast** —
+    visible only to sessions that explicitly read this session's
+    session_state.
 
     Args:
         session_id: this session's id.
-        text: the question.
+        text: the question. Be specific — vague questions get vague answers.
+        target_session_id: optional — UUID or name of the session this
+            question is directed at. None = broadcast.
     """
-    return await _monitor_tools.session_log_question(session_id, text)
+    return await _monitor_tools.session_log_question(
+        session_id, text, target_session_id=target_session_id,
+    )
+
+
+@mcp.tool()
+@logged_tool("session_incoming_questions")
+async def session_incoming_questions(session_id: str) -> str:
+    """Open questions from OTHER sessions targeted at this one.
+
+    Symmetric counterpart to `session_pending_notes`: pending shows
+    answers to questions THIS session asked; incoming shows questions
+    OTHER sessions asked specifically targeting THIS session.
+
+    The UserPromptSubmit hook auto-fetches this on every turn, so most
+    of the time you don't need to call it manually. Use it as a peek
+    when you want to see incoming asks without typing a real prompt.
+
+    Args:
+        session_id: this session's id.
+    """
+    return await _monitor_tools.session_incoming_questions(session_id)
 
 
 @mcp.tool()
