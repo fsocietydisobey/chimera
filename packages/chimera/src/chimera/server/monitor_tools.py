@@ -741,6 +741,22 @@ async def session_log_question(
     )
 
 
+async def session_post_notice(
+    target_session_id: str,
+    text: str,
+    from_session_id: str = "external",
+) -> str:
+    """Drop a FYI/ack note in another session's inbox — no answer expected."""
+    data = _post(
+        f"/api/sessions/{urllib.parse.quote(target_session_id)}/notice",
+        {"text": text, "from_session_id": from_session_id},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return f"📨 notice posted to {target_session_id}"
+
+
 async def session_wait_for_answer(
     session_id: str,
     question_id: str,

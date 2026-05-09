@@ -409,6 +409,46 @@ def pending_notes(session_id: str, mark_read: bool = True) -> list[dict]:
     return pending
 
 
+def post_notice(
+    target_session_id: str,
+    text: str,
+    *,
+    from_session_id: str = "external",
+) -> dict:
+    """Drop a "FYI" / "ack" note in another session's inbox. No question
+    required, no answer expected.
+
+    Fills the gap between session_log_question (requires answer) and
+    session_log_decision (only visible on pull). Use cases: "thanks,
+    landed" / "FYI I went with option C" / "your patch fixed it" — info
+    that the other session benefits from seeing but shouldn't have to
+    respond to.
+
+    The note appears in target's inbox alongside answers. The hook auto-
+    inject renders it as `[notice from X]` and marks it read on first
+    surface so it doesn't re-loop. No question_id is set — notices are
+    standalone.
+
+    `target_session_id` accepts UUID or friendly name. `from_session_id`
+    is for attribution; defaults to "external" if the caller doesn't
+    know its own id (rare — usually you'd pass your session_id).
+    """
+    target_session_id = resolve_session_id(target_session_id)
+    note = {
+        "ts": _now_iso(),
+        "kind": "notice",
+        "text": text,
+        "from_session_id": from_session_id,
+        "read": False,
+    }
+    _append_jsonl(_session_dir(target_session_id) / "inbox.jsonl", note)
+    log.info(
+        "session %s: notice posted by %s — %s",
+        target_session_id, from_session_id, text[:80],
+    )
+    return note
+
+
 async def wait_for_answer(
     target_session_id: str,
     question_id: str,

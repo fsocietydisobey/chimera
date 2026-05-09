@@ -55,6 +55,11 @@ class AnswerReq(BaseModel):
     from_session_id: str = "external"
 
 
+class NoticeReq(BaseModel):
+    text: str
+    from_session_id: str = "external"
+
+
 def build_router():
     fastapi = require("fastapi")
 
@@ -158,5 +163,15 @@ def build_router():
             )
         except ValueError as e:
             raise fastapi.HTTPException(404, str(e))
+
+    @router.post("/sessions/{session_id}/notice")
+    async def post_notice(session_id: str, req: NoticeReq) -> dict:
+        """Drop a FYI/ack note in target session's inbox. No question/answer
+        coupling — for "you don't need to reply, just want you to know" info."""
+        return sessions.post_notice(
+            session_id,
+            req.text,
+            from_session_id=req.from_session_id,
+        )
 
     return router

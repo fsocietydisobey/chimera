@@ -1640,6 +1640,39 @@ async def session_log_question(
 
 
 @mcp.tool()
+@logged_tool("session_post_notice")
+async def session_post_notice(
+    target_session_id: str,
+    text: str,
+    from_session_id: str = "external",
+) -> str:
+    """**FYI / ack channel.** Drop a note in another session's inbox.
+
+    No question, no answer expected. Use for closing-the-loop info that
+    the other session benefits from seeing but shouldn't have to respond
+    to: "thanks, landed", "I went with option C", "your patch fixed it",
+    "FYI ramping flag X to 100% Tuesday."
+
+    The note appears under the target's `📬 chimera inbox` block on
+    their next turn (auto-injected by UserPromptSubmit hook), tagged
+    `[notice from <you>]`. Marked read on first surface — won't re-loop.
+
+    Use this INSTEAD OF session_log_question when you don't actually
+    need an answer. Asking unnecessary questions is the ping-pong
+    anti-pattern — notices break the cycle.
+
+    Args:
+        target_session_id: who you're FYIing — UUID or friendly name.
+        text: the FYI body. Be specific.
+        from_session_id: your session id (for attribution in the
+            target's inbox). Defaults to "external" if you don't pass it.
+    """
+    return await _monitor_tools.session_post_notice(
+        target_session_id, text, from_session_id,
+    )
+
+
+@mcp.tool()
 @logged_tool("session_wait_for_answer")
 async def session_wait_for_answer(
     session_id: str,
