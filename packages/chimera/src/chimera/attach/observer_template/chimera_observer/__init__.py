@@ -13,7 +13,8 @@ Wire protocol (chimera-defined, vendor-neutral):
         "name": "node_name" | "model_name" | None,
         "event": "chain_start" | "chain_end" | "llm_start" | "llm_end" |
                  "tool_start" | "tool_end" | "chain_error" | "llm_error" |
-                 "tool_error",
+                 "tool_error" | "external_start" | "external_end" |
+                 "external_error",
         "ts": <unix_seconds>,
         "extra": {...} | null   # token usage, error msg, etc.
     }
@@ -43,9 +44,11 @@ import queue
 import threading
 import time
 import urllib.request
+import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 _DEFAULT_ENDPOINT = "http://127.0.0.1:8740"
 _QUEUE_MAX = 1000
@@ -255,6 +258,154 @@ def _try_get_handler_class():
     return ChimeraTracer
 
 
+def _should_skip_external(host: str) -> bool:
+    """True if a hostname is loopback or chimera's own endpoint (loop guard).
+
+    We MUST skip our own daemon's host or the observer's POSTs would
+    recursively trigger more heartbeats. Localhost/loopback gets skipped
+    too — most of what flows there is dev infra (databases, redis, the
+    chimera daemon itself) and the noise/value ratio is bad.
+    """
+    if not host:
+        return True
+    h = host.lower()
+    if h in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if h.startswith("127.") or h.startswith("10."):
+        return True
+    # Skip whatever host chimera lives on (parsed from _endpoint at attach time)
+    try:
+        chimera_host = urlsplit(_endpoint).hostname
+        if chimera_host and chimera_host.lower() == h:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _emit_external_start(host: str, method: str, path: str) -> str:
+    run_id = str(uuid.uuid4())
+    _enqueue(
+        "external_start",
+        run_id,
+        name=host,
+        extra={"method": method, "path": path[:200]},
+    )
+    return run_id
+
+
+def _emit_external_end(run_id: str, host: str, method: str, status: int, ms: int) -> None:
+    _enqueue(
+        "external_end",
+        run_id,
+        name=host,
+        extra={"method": method, "status": status, "ms": ms},
+    )
+
+
+def _emit_external_error(run_id: str, host: str, method: str, error: str, ms: int) -> None:
+    _enqueue(
+        "external_error",
+        run_id,
+        name=host,
+        extra={"method": method, "error": error[:300], "ms": ms},
+    )
+
+
+def _patch_httpx() -> None:
+    """Wrap httpx.Client.send / httpx.AsyncClient.send to emit heartbeats.
+
+    Idempotent — checks _chimera_patched flag. No-op if httpx not installed.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return
+
+    sync_send = getattr(httpx.Client, "send", None)
+    if sync_send is not None and not getattr(sync_send, "_chimera_patched", False):
+        original_sync = sync_send
+
+        def patched_sync_send(self, request, **kwargs):
+            host = request.url.host or ""
+            if _should_skip_external(host):
+                return original_sync(self, request, **kwargs)
+            run_id = _emit_external_start(host, request.method, request.url.path or "/")
+            start = time.time()
+            try:
+                resp = original_sync(self, request, **kwargs)
+                ms = int((time.time() - start) * 1000)
+                _emit_external_end(run_id, host, request.method, resp.status_code, ms)
+                return resp
+            except Exception as exc:
+                ms = int((time.time() - start) * 1000)
+                _emit_external_error(run_id, host, request.method, repr(exc), ms)
+                raise
+
+        patched_sync_send._chimera_patched = True  # type: ignore[attr-defined]
+        httpx.Client.send = patched_sync_send  # type: ignore[method-assign]
+
+    async_send = getattr(httpx.AsyncClient, "send", None)
+    if async_send is not None and not getattr(async_send, "_chimera_patched", False):
+        original_async = async_send
+
+        async def patched_async_send(self, request, **kwargs):
+            host = request.url.host or ""
+            if _should_skip_external(host):
+                return await original_async(self, request, **kwargs)
+            run_id = _emit_external_start(host, request.method, request.url.path or "/")
+            start = time.time()
+            try:
+                resp = await original_async(self, request, **kwargs)
+                ms = int((time.time() - start) * 1000)
+                _emit_external_end(run_id, host, request.method, resp.status_code, ms)
+                return resp
+            except Exception as exc:
+                ms = int((time.time() - start) * 1000)
+                _emit_external_error(run_id, host, request.method, repr(exc), ms)
+                raise
+
+        patched_async_send._chimera_patched = True  # type: ignore[attr-defined]
+        httpx.AsyncClient.send = patched_async_send  # type: ignore[method-assign]
+
+
+def _patch_requests() -> None:
+    """Wrap requests.Session.send to emit heartbeats. No-op if not installed."""
+    try:
+        import requests
+    except ImportError:
+        return
+
+    send = getattr(requests.Session, "send", None)
+    if send is None or getattr(send, "_chimera_patched", False):
+        return
+    original = send
+
+    def patched_send(self, request, **kwargs):
+        try:
+            host = urlsplit(request.url).hostname or ""
+            method = request.method or "?"
+            path = urlsplit(request.url).path or "/"
+        except Exception:
+            return original(self, request, **kwargs)
+        if _should_skip_external(host):
+            return original(self, request, **kwargs)
+        run_id = _emit_external_start(host, method, path)
+        start = time.time()
+        try:
+            resp = original(self, request, **kwargs)
+            ms = int((time.time() - start) * 1000)
+            _emit_external_end(run_id, host, method, resp.status_code, ms)
+            return resp
+        except Exception as exc:
+            ms = int((time.time() - start) * 1000)
+            _emit_external_error(run_id, host, method, repr(exc), ms)
+            raise
+
+    patched_send._chimera_patched = True  # type: ignore[attr-defined]
+    requests.Session.send = patched_send  # type: ignore[method-assign]
+
+
 def attach() -> None:
     """Register the chimera tracer as a global LangChain callback.
 
@@ -277,6 +428,20 @@ def attach() -> None:
 
     # Pre-warm singleton so the queue + drain thread exist before any callback fires
     _ensure_singleton()
+
+    # External HTTP instrumentation — captures Roboflow, OpenAI, Anthropic,
+    # any outbound HTTP. Without this the dashboard goes dark whenever the
+    # app is blocked on an external API since LangChain callbacks only fire
+    # for in-process chain/llm/tool boundaries. Each patch is silent on its
+    # own failure path.
+    try:
+        _patch_httpx()
+    except Exception:
+        pass
+    try:
+        _patch_requests()
+    except Exception:
+        pass
 
     # Register the handler class with LangChain. The (handle_class, env_var)
     # combo means: "every time CallbackManager.configure() runs and CHIMERA_
