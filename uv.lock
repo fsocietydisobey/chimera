@@ -343,6 +343,7 @@ dependencies = [
     { name = "langgraph-checkpoint-sqlite" },
     { name = "mcp", extra = ["cli"] },
     { name = "psutil" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
@@ -350,14 +351,6 @@ dependencies = [
     { name = "tree-sitter" },
     { name = "tree-sitter-python" },
     { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "psycopg", extra = ["binary"] },
-]
-postgres = [
-    { name = "psycopg", extra = ["binary"] },
 ]
 
 [package.metadata]
@@ -374,8 +367,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-sqlite", specifier = ">=2" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.0" },
     { name = "psutil", specifier = ">=5" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'all'", specifier = ">=3.1" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "python-dotenv", specifier = ">=1" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -384,7 +376,7 @@ requires-dist = [
     { name = "tree-sitter-python", specifier = ">=0.21" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["postgres", "all"]
+provides-extras = ["all"]
 
 [[package]]
 name = "chimera-transport"
