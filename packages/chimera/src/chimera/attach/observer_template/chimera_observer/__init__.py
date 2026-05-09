@@ -278,23 +278,26 @@ def attach() -> None:
     # Pre-warm singleton so the queue + drain thread exist before any callback fires
     _ensure_singleton()
 
-    # Register the handler class with LangChain. The (handler_class, env_var)
+    # Register the handler class with LangChain. The (handle_class, env_var)
     # combo means: "every time CallbackManager.configure() runs and CHIMERA_
-    # OBSERVER_ACTIVE env is truthy, instantiate handler_class and add it to
+    # OBSERVER_ACTIVE env is truthy, instantiate handle_class and add it to
     # the inheritable callbacks list." Each instance is a thin shim — they
     # all funnel into the module-level singleton queue.
+    #
+    # Critical: we pass args POSITIONALLY. LangChain's kwarg is `handle_class`
+    # (no 'r') and `env_var`; if upstream renames a kwarg, positional calls
+    # keep working as long as the order is stable. v0.1.0 of this observer
+    # set the contextvar to `[tracer]` directly, which LangChain's _configure
+    # adds as a single handler — meaning self.handlers ends up containing
+    # a list, and later iteration crashes with AttributeError. This pattern
+    # avoids that: handle_class lets LangChain instantiate fresh per context.
     try:
         from contextvars import ContextVar
         from langchain_core.tracers.context import register_configure_hook  # type: ignore[import-not-found]
 
         var: ContextVar = ContextVar("chimera_handlers", default=None)
         os.environ[_ACTIVE_ENV] = "1"
-        register_configure_hook(
-            var,
-            inheritable=True,
-            handler_class=handler_class,
-            env_var=_ACTIVE_ENV,
-        )
+        register_configure_hook(var, True, handler_class, _ACTIVE_ENV)
     except Exception:
         # If registration fails, the handler simply doesn't fire. App is
         # unaffected. We don't print anything so we don't pollute startup.
