@@ -332,7 +332,11 @@ async def brainstorm(topic: str, context: str = "", cwd: str = "") -> str:
             here AND the output file lands here. Defaults to chimera's
             resolved PROJECT_ROOT.
     """
-    target_cwd = cwd or config.PROJECT_ROOT
+    # Resolve target cwd — prefer explicit arg, fall back to env or process cwd.
+    # (Legacy code referenced `config.PROJECT_ROOT` which doesn't exist on the
+    # new OrchestratorConfig schema.)
+    import os as _os
+    target_cwd = cwd or _os.environ.get("PROJECT_ROOT") or _os.environ.get("PWD") or _os.getcwd()
 
     prompt = build_prompt(
         BRAINSTORM_SYSTEM_PROMPT,

@@ -227,19 +227,33 @@ def main() -> int:
     if not session_id:
         return 0
 
-    # Two parallel jobs: (1) read this session's inbox, (2) discover other
-    # active sessions. Either may produce output; we concatenate when both do.
+    # Three parallel jobs:
+    #   (1) Surface this session's chimera id so the agent can pass it to
+    #       session_log_* tools without first having to discover it.
+    #   (2) Read this session's inbox — answers other sessions have posted.
+    #   (3) Discover other active sessions so the agent knows about
+    #       parallel work without the user having to ask.
+    blocks: list[str] = []
+
+    # Identity block — always emitted, very short. Solves the "agent doesn't
+    # know its own session_id" friction; without this, every CLAUDE.md
+    # instruction telling the agent to log decisions has to start with
+    # "first run session_list and figure out which one is you," which is
+    # awkward and error-prone.
+    blocks.append(
+        f"🆔 chimera session_id: `{session_id}`\n"
+        "When you call `mcp__chimera__session_log_*` / `session_set_*` tools, "
+        "pass this id as `session_id`. Other sessions can refer to you by name "
+        "after you call `session_set_name(...)`."
+    )
+
     notes = _consume_inbox(session_id)
     others = _discover_other_active_sessions(session_id, within_minutes=30)
 
-    blocks: list[str] = []
     if notes:
         blocks.append(_format_inbox(notes))
     if others:
         blocks.append(_format_active_sessions(others))
-
-    if not blocks:
-        return 0
 
     output = {
         "hookSpecificOutput": {
