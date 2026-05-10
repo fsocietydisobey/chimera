@@ -857,7 +857,13 @@ def subscribe_handoff(handoff_id: str, session_id: str) -> dict:
     if not _HANDOFFS_PATH.exists():
         raise ValueError(f"No handoff with id {handoff_id!r}")
 
-    session_id = resolve_session_id(session_id)
+    # Lenient resolve: subscribers / releasers may not have an on-disk
+    # session dir yet (fresh sessions that haven't logged anything).
+    # If resolve_session_id fails, use the literal id.
+    try:
+        session_id = resolve_session_id(session_id)
+    except ValueError:
+        pass  # use the literal session_id as given
     handoffs = _read_jsonl(_HANDOFFS_PATH)
     matched: dict | None = None
     for h in handoffs:
@@ -887,7 +893,13 @@ def unsubscribe_handoff(handoff_id: str, session_id: str) -> dict:
     if not _HANDOFFS_PATH.exists():
         raise ValueError(f"No handoff with id {handoff_id!r}")
 
-    session_id = resolve_session_id(session_id)
+    # Lenient resolve: subscribers / releasers may not have an on-disk
+    # session dir yet (fresh sessions that haven't logged anything).
+    # If resolve_session_id fails, use the literal id.
+    try:
+        session_id = resolve_session_id(session_id)
+    except ValueError:
+        pass  # use the literal session_id as given
     handoffs = _read_jsonl(_HANDOFFS_PATH)
     matched: dict | None = None
     for h in handoffs:
@@ -920,7 +932,13 @@ def release_handoff(handoff_id: str, session_id: str) -> dict:
     if not _HANDOFFS_PATH.exists():
         raise ValueError(f"No handoff with id {handoff_id!r}")
 
-    session_id = resolve_session_id(session_id)
+    # Lenient resolve: subscribers / releasers may not have an on-disk
+    # session dir yet (fresh sessions that haven't logged anything).
+    # If resolve_session_id fails, use the literal id.
+    try:
+        session_id = resolve_session_id(session_id)
+    except ValueError:
+        pass  # use the literal session_id as given
     handoffs = _read_jsonl(_HANDOFFS_PATH)
     matched: dict | None = None
     for h in handoffs:

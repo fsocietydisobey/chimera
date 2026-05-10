@@ -201,6 +201,23 @@ def build_app():
 
         asyncio.create_task(_supervisor())
 
+    # Transcript watcher — sync Claude Code /rename events to chimera
+    # session names within ~100ms instead of waiting for next user prompt.
+    @app.on_event("startup")
+    async def _start_transcript_watcher() -> None:
+        from . import transcript_watcher
+
+        async def _watcher() -> None:
+            try:
+                await transcript_watcher.watch_loop()
+            except Exception as exc:
+                print(
+                    f"chimera monitor: transcript watcher crashed: {exc}",
+                    file=sys.stderr,
+                )
+
+        asyncio.create_task(_watcher())
+
     # Static frontend — only mount if dist/ exists; otherwise serve a placeholder
     dist = ui_build.dist_dir()
     if dist.is_dir() and (dist / "index.html").is_file():
