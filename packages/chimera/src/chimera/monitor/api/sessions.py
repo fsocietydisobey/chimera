@@ -68,7 +68,14 @@ class HandoffReq(BaseModel):
     text: str
     from_session_id: str
     scope_cwd: str | None = None
+    scope_project: str | None = None  # chimera-attached project label
     expires_in_hours: float = 168.0
+
+
+class RouteMessageReq(BaseModel):
+    target: str
+    text: str
+    from_session_id: str
 
 
 def build_router():
@@ -216,16 +223,33 @@ def build_router():
     async def post_handoff(req: HandoffReq) -> dict:
         """Drop a handoff note any future session in matching cwd will read.
 
-        Closes the gap that post_notice left: notices need a target_session_id
-        but cross-session handoffs to future sessions had no target. Handoffs
-        are scoped by cwd and surface on the next matching SessionStart.
+        Accepts EITHER scope_cwd (explicit path) OR scope_project (the
+        label from chimera attach). Project labels are usually what users
+        want — they're stable, readable, and already-declared.
         """
-        return sessions.post_handoff(
-            req.from_session_id,
-            req.text,
-            scope_cwd=req.scope_cwd,
-            expires_in_hours=req.expires_in_hours,
-        )
+        try:
+            return sessions.post_handoff(
+                req.from_session_id,
+                req.text,
+                scope_cwd=req.scope_cwd,
+                scope_project=req.scope_project,
+                expires_in_hours=req.expires_in_hours,
+            )
+        except ValueError as e:
+            raise fastapi.HTTPException(404, str(e))
+
+    @router.post("/route")
+    async def route_message_endpoint(req: RouteMessageReq) -> dict:
+        """Smart-route a message: tries session-name first, falls back
+        to project-label. Lets clients say "send to backend" without
+        knowing whether `backend` is a live session or a project.
+        """
+        try:
+            return sessions.route_message(
+                req.target, req.text, from_session_id=req.from_session_id,
+            )
+        except ValueError as e:
+            raise fastapi.HTTPException(404, str(e))
 
     @router.get("/handoffs/consume")
     async def consume_handoffs(session_id: str, cwd: str) -> dict:

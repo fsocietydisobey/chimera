@@ -691,11 +691,83 @@ def summarize_transcript(
     return summary
 
 
+def _resolve_project_label_to_cwd(label: str) -> str | None:
+    """Look up a chimera-attached project by label. Returns its project_path
+    (which is the cwd handoffs are scoped against).
+
+    Uses ~/.local/state/chimera/attached.json from the venv-injection
+    registry. Sessions never need to type cwd paths directly — they
+    address projects by the same name they used at `chimera attach`.
+    """
+    try:
+        from chimera.attach.registry import list_attached
+    except ImportError:
+        return None
+    for entry in list_attached():
+        if entry.get("label") == label:
+            return entry.get("project_path")
+    return None
+
+
+def route_message(
+    target: str,
+    text: str,
+    *,
+    from_session_id: str,
+) -> dict:
+    """Send `text` to `target` — smart-routes between notice and handoff.
+
+    Resolution order:
+      1. If `target` matches a known session name/UUID → post_notice
+         (one-to-one delivery, target's inbox)
+      2. If `target` matches a chimera-attached project label →
+         post_handoff scoped to that project's cwd (one-to-many, any
+         future session in that project sees it)
+      3. Otherwise → ValueError (caller picks alternative)
+
+    Returns a dict with both the action taken and the underlying record,
+    so callers can show "📨 sent as notice" vs "📦 sent as project handoff".
+    """
+    # Try session resolution first — fastest, most common case
+    try:
+        resolved = resolve_session_id(target)
+        # Hit: this is a known session. Post a notice.
+        note = post_notice(resolved, text, from_session_id=from_session_id)
+        return {
+            "routed_as": "notice",
+            "target_session_id": resolved,
+            "record": note,
+        }
+    except ValueError:
+        pass  # Fall through to project lookup
+
+    # Try project label lookup
+    project_cwd = _resolve_project_label_to_cwd(target)
+    if project_cwd:
+        handoff = post_handoff(
+            from_session_id, text,
+            scope_cwd=project_cwd,
+        )
+        return {
+            "routed_as": "project_handoff",
+            "project_label": target,
+            "scope_cwd": project_cwd,
+            "record": handoff,
+        }
+
+    raise ValueError(
+        f"No session named or id'd {target!r} and no chimera-attached "
+        f"project labeled {target!r}. Use session_list() to see active "
+        f"sessions, or `chimera attached` to see project labels."
+    )
+
+
 def post_handoff(
     from_session_id: str,
     text: str,
     *,
     scope_cwd: str | None = None,
+    scope_project: str | None = None,
     expires_in_hours: float = 168.0,
 ) -> dict:
     """Drop a handoff note any FUTURE session in this project will read.
@@ -722,6 +794,17 @@ def post_handoff(
     notes, smaller for time-bounded asks.
     """
     inferred = scope_cwd
+    # Project label takes precedence over file-touch inference but not
+    # over an explicit scope_cwd. Resolution: scope_cwd > scope_project >
+    # file-touch heuristic > os.getcwd().
+    if inferred is None and scope_project:
+        inferred = _resolve_project_label_to_cwd(scope_project)
+        if inferred is None:
+            raise ValueError(
+                f"scope_project={scope_project!r} doesn't match any "
+                f"chimera-attached project. Run `chimera attached` to "
+                f"see labels, or pass scope_cwd explicitly."
+            )
     if inferred is None:
         # Infer from session's most-recent file touch — that's the
         # directory they were working in. Fallback: process cwd.
