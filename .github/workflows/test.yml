@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: setup python
+        run: uv python install 3.13
+
+      - name: sync workspace
+        # `--all-packages` to install every package's dev deps, including
+        # pytest. Single command resolves the lockfile across the workspace.
+        run: uv sync --all-packages
+
+      - name: pytest
+        run: uv run pytest -v
+        env:
+          # Force tests to use a clean state dir, not the runner's home.
+          # tests/conftest.py already monkeypatches XDG_STATE_HOME but
+          # the env var here covers any code path that bypasses fixture.
+          XDG_STATE_HOME: /tmp/chimera-test-state
+
+      - name: pytest collection only (other packages)
+        # Sanity check that test discovery doesn't error out for the
+        # packages we haven't bootstrapped tests for yet (scarlet,
+        # seance, specter). When those packages add real tests, the
+        # main pytest step picks them up automatically via the
+        # tool.pytest testpaths glob.
+        run: uv run pytest --collect-only -q
+        continue-on-error: true
