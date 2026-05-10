@@ -794,6 +794,92 @@ async def session_ack_notes(
     return f"📭 acked {data.get('acked', 0)} note(s)"
 
 
+async def session_query_transcript(
+    session_id: str,
+    query: str,
+    context_lines: int = 1,
+    max_matches: int = 20,
+) -> str:
+    """Grep a session's Claude Code transcript for `query`.
+
+    Returns matched turns + surrounding context. Use to read what a
+    now-stopped session discussed.
+    """
+    qstr = (
+        f"?q={urllib.parse.quote(query)}"
+        f"&context_lines={context_lines}&max_matches={max_matches}"
+    )
+    data = _get(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/transcript/query{qstr}",
+        timeout=15.0,
+    )
+    if isinstance(data, str):
+        return data
+    if not data.get("matches"):
+        if data.get("error"):
+            return f"❌ {data['error']}"
+        return f"📜 no matches for {query!r} in {session_id}'s transcript"
+    lines = [
+        f"📜 **{data['match_count']} match(es) for {query!r}** "
+        f"(transcript: {data['total_turns']} turns):",
+        "",
+    ]
+    for m in data["matches"]:
+        lines.append(f"--- match at turn {m['match_at_turn']} ---")
+        for ex in m["excerpt"]:
+            marker = "▶" if ex.get("is_match") else " "
+            role = ex.get("role") or ex.get("type") or "?"
+            preview = ex["text_preview"]
+            lines.append(f"  {marker} [{role}] {preview}")
+        lines.append("")
+    if data.get("truncated"):
+        lines.append(f"(truncated at {max_matches} matches; refine query or raise max_matches)")
+    return "\n".join(lines)
+
+
+async def session_summarize_transcript(
+    session_id: str,
+    focus: str | None = None,
+) -> str:
+    """Heuristic summary of a session's transcript (no LLM call)."""
+    qstr = f"?focus={urllib.parse.quote(focus)}" if focus else ""
+    data = _get(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/transcript/summary{qstr}",
+        timeout=20.0,
+    )
+    if isinstance(data, str):
+        return data
+    if data.get("error"):
+        return f"❌ {data['error']}"
+    lines = [
+        f"📜 **transcript summary for {session_id}**",
+        f"  size: {data.get('transcript_size_kb', '?')} KB",
+        f"  turns: {data.get('turns_by_role', {})}",
+        "",
+        f"  top tools used: {data.get('top_tools_used', {})}",
+        "",
+        f"  files touched ({data.get('files_touched_count', 0)}, sample):",
+    ]
+    for f in data.get("files_touched_sample", [])[:15]:
+        lines.append(f"    - {f}")
+    lines.append("")
+    lines.append(f"  recent user prompts ({data.get('user_messages_count', 0)} total):")
+    for u in data.get("user_messages_recent", []):
+        lines.append(f"    > {u[:200]}")
+    lines.append("")
+    lines.append(f"  recent assistant message intros ({data.get('assistant_text_count', 0)} total):")
+    for a in data.get("assistant_text_recent_intros", []):
+        lines.append(f"    · {a[:200]}")
+    if data.get("focus_query"):
+        lines.append("")
+        lines.append(f"  focus={data['focus_query']!r}: {data.get('focus_match_count', 0)} matches")
+        for m in data.get("focus_matches", [])[:5]:
+            for ex in m.get("excerpt", []):
+                if ex.get("is_match"):
+                    lines.append(f"    ▶ {ex['text_preview'][:300]}")
+    return "\n".join(lines)
+
+
 async def session_post_handoff(
     from_session_id: str,
     text: str,

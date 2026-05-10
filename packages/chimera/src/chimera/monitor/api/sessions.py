@@ -222,6 +222,38 @@ def build_router():
         """Return handoffs matching cwd; mark this session_id as having read."""
         return {"handoffs": sessions.consume_handoffs(session_id, cwd)}
 
+    @router.get("/sessions/{session_id}/transcript/query")
+    async def query_session_transcript(
+        session_id: str,
+        q: str,
+        context_lines: int = 1,
+        max_matches: int = 20,
+    ) -> dict:
+        """Grep a session's Claude Code transcript for `q` (substring match).
+
+        Returns matched turns with surrounding context. Use case: a future
+        session needs to know what a now-stopped session discussed about
+        a specific topic.
+        """
+        return sessions.query_transcript(
+            session_id, q,
+            context_lines=context_lines,
+            max_matches=max_matches,
+        )
+
+    @router.get("/sessions/{session_id}/transcript/summary")
+    async def summarize_session_transcript(
+        session_id: str,
+        focus: str | None = None,
+    ) -> dict:
+        """Heuristic summary of a session's transcript (no LLM call).
+
+        Returns turn counts, tool-use frequency, file paths mentioned,
+        recent user prompts, recent assistant message intros. Calling
+        agent reconstructs context from this; no LLM tokens spent.
+        """
+        return sessions.summarize_transcript(session_id, focus=focus)
+
     @router.get("/sessions/{session_id}/inbox/archive")
     async def search_inbox_archive(
         session_id: str,

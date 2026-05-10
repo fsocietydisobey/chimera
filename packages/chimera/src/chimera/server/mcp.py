@@ -1693,6 +1693,58 @@ async def session_ack_notes(
 
 
 @mcp.tool()
+@logged_tool("session_query_transcript")
+async def session_query_transcript(
+    session_id: str,
+    query: str,
+    context_lines: int = 1,
+    max_matches: int = 20,
+) -> str:
+    """**Read what a stopped session discussed.** Greps the on-disk
+    Claude Code transcript for `query` (case-insensitive substring),
+    returns matched turns with surrounding context.
+
+    Use case: a future session opens, needs to know what a now-stopped
+    session said about a specific topic. The agent's brain is gone but
+    its conversation log is on disk — search it.
+
+    Args:
+        session_id: the session to search.
+        query: substring to find (case-insensitive).
+        context_lines: turns to include before+after each match (1 default).
+        max_matches: cap result set (20 default).
+    """
+    return await _monitor_tools.session_query_transcript(
+        session_id, query, context_lines, max_matches,
+    )
+
+
+@mcp.tool()
+@logged_tool("session_summarize_transcript")
+async def session_summarize_transcript(
+    session_id: str,
+    focus: str | None = None,
+) -> str:
+    """**Heuristic summary of a stopped session's transcript** — no LLM call.
+
+    Returns: turn counts, top tools used, file paths touched, recent
+    user prompts, recent assistant message intros. The calling agent
+    reconstructs context by reading these signals; no LLM tokens spent
+    on summarization.
+
+    Use this as the FIRST move when picking up a stopped session's
+    work — get the lay of the land cheaply, then drill into specifics
+    with session_query_transcript.
+
+    Args:
+        session_id: the session to summarize.
+        focus: optional substring; when set, also runs query_transcript
+            and embeds the matches in the response.
+    """
+    return await _monitor_tools.session_summarize_transcript(session_id, focus)
+
+
+@mcp.tool()
 @logged_tool("session_post_handoff")
 async def session_post_handoff(
     from_session_id: str,

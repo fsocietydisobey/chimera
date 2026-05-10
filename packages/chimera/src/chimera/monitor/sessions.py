@@ -429,6 +429,268 @@ def pending_notes(session_id: str, mark_read: bool = True) -> list[dict]:
 _HANDOFFS_PATH = _BASE_DIR.parent / "handoffs.jsonl"
 
 
+_CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
+
+
+def _find_transcript(session_id: str) -> Path | None:
+    """Locate the Claude Code transcript file for `session_id`.
+
+    Claude Code stores transcripts at ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl.
+    Encoded cwd: leading slash + each path separator replaced with '-',
+    so /home/_3ntropy/dev/chimera → -home--3ntropy-dev-chimera. Different
+    projects each get their own subdir, so we scan all of them.
+
+    Returns the first match, or None if no transcript exists for this id
+    (session never logged anything to disk, or has been deleted).
+    """
+    if not _CLAUDE_PROJECTS_DIR.exists():
+        return None
+    target = f"{session_id}.jsonl"
+    for project_dir in _CLAUDE_PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+        candidate = project_dir / target
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _extract_text_from_message(msg: Any) -> str:
+    """Pull readable text out of a transcript message field.
+
+    Claude Code transcript JSONL has nested message structures:
+    - user messages: {message: {content: "string"}} OR {message: {content: [{type, text}]}}
+    - assistant messages: {message: {content: [{type: "text", text: "..."}, {type: "tool_use", ...}]}}
+    - tool_result: {tool_use_id, content: "..." OR [{type, text}]}
+
+    Returns concatenated readable text; tool_use args/results stringified.
+    """
+    if isinstance(msg, str):
+        return msg
+    if isinstance(msg, list):
+        out = []
+        for part in msg:
+            out.append(_extract_text_from_message(part))
+        return " ".join(p for p in out if p)
+    if isinstance(msg, dict):
+        # Direct text content
+        if "text" in msg and isinstance(msg["text"], str):
+            return msg["text"]
+        # Tool use — return name + brief arg summary
+        if msg.get("type") == "tool_use":
+            tname = msg.get("name", "?")
+            args = msg.get("input", {})
+            if isinstance(args, dict):
+                arg_summary = ", ".join(
+                    f"{k}={str(v)[:60]}" for k, v in args.items()
+                )[:300]
+            else:
+                arg_summary = str(args)[:300]
+            return f"[tool_use {tname}({arg_summary})]"
+        # Tool result
+        if msg.get("type") == "tool_result":
+            content = msg.get("content")
+            return f"[tool_result {_extract_text_from_message(content)[:500]}]"
+        # Nested message
+        if "message" in msg:
+            return _extract_text_from_message(msg["message"])
+        if "content" in msg:
+            return _extract_text_from_message(msg["content"])
+    return ""
+
+
+def query_transcript(
+    session_id: str,
+    query: str,
+    *,
+    context_lines: int = 1,
+    max_matches: int = 20,
+) -> dict:
+    """Grep a session's Claude Code transcript for `query` (case-insensitive
+    substring). Returns matched turns with surrounding context.
+
+    Use case: a future session needs to know what a now-stopped session
+    discussed about a specific topic. Read what they said without being
+    able to re-prompt them.
+
+    `context_lines`: how many adjacent turns to include before+after each
+    match (1 = the turn before and after; 0 = match only).
+    `max_matches`: cap result set so a query like "the" doesn't return
+    thousands of hits.
+    """
+    transcript = _find_transcript(session_id)
+    if transcript is None:
+        return {
+            "session_id": session_id,
+            "found": False,
+            "error": f"no transcript on disk for session {session_id!r}",
+            "matches": [],
+        }
+
+    # Load all turns
+    turns: list[dict] = []
+    try:
+        with transcript.open("r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    turn = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                turn["_line_no"] = i
+                turn["_text"] = _extract_text_from_message(turn)
+                turns.append(turn)
+    except OSError as e:
+        return {
+            "session_id": session_id,
+            "found": False,
+            "error": f"transcript read failed: {e}",
+            "matches": [],
+        }
+
+    q = query.lower()
+    matches: list[dict] = []
+    for idx, turn in enumerate(turns):
+        if q not in turn["_text"].lower():
+            continue
+        start = max(0, idx - context_lines)
+        end = min(len(turns), idx + context_lines + 1)
+        excerpt_turns = []
+        for j in range(start, end):
+            t = turns[j]
+            excerpt_turns.append({
+                "line_no": t["_line_no"],
+                "type": t.get("type") or "?",
+                "role": (t.get("message") or {}).get("role") if isinstance(t.get("message"), dict) else None,
+                "is_match": j == idx,
+                "text_preview": t["_text"][:500] + ("…" if len(t["_text"]) > 500 else ""),
+            })
+        matches.append({
+            "match_at_turn": idx,
+            "match_at_line": turn["_line_no"],
+            "excerpt": excerpt_turns,
+        })
+        if len(matches) >= max_matches:
+            break
+
+    return {
+        "session_id": session_id,
+        "transcript_path": str(transcript),
+        "total_turns": len(turns),
+        "query": query,
+        "match_count": len(matches),
+        "truncated": len(matches) >= max_matches,
+        "matches": matches,
+    }
+
+
+def summarize_transcript(
+    session_id: str,
+    *,
+    focus: str | None = None,
+) -> dict:
+    """Heuristic summary of a session's transcript — no LLM call.
+
+    Returns: turn counts by role, top tool calls by frequency, list of
+    file paths mentioned in tool_use args, recent user messages (often
+    convey "what was the user asking about"), and recent assistant
+    text-message intros (first 200 chars of each assistant text turn).
+
+    The calling agent can read this and reconstruct what the prior
+    session was working on, then dig deeper with query_transcript on
+    specific keywords. No tokens spent on LLM-side summarization.
+
+    `focus`: when provided, also runs query_transcript(focus) and
+    embeds the results in the response.
+    """
+    from collections import Counter
+
+    transcript = _find_transcript(session_id)
+    if transcript is None:
+        return {
+            "session_id": session_id,
+            "found": False,
+            "error": f"no transcript on disk for session {session_id!r}",
+        }
+
+    turns_by_role: Counter[str] = Counter()
+    tool_uses: Counter[str] = Counter()
+    file_paths: set[str] = set()
+    user_messages: list[str] = []
+    assistant_text_intros: list[str] = []
+
+    try:
+        with transcript.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    turn = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                ttype = turn.get("type") or "?"
+                msg = turn.get("message") or {}
+                role = msg.get("role") if isinstance(msg, dict) else None
+                turns_by_role[role or ttype] += 1
+
+                # Extract tool_use names + file paths
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        if part.get("type") == "tool_use":
+                            tool_uses[part.get("name", "?")] += 1
+                            args = part.get("input", {})
+                            if isinstance(args, dict):
+                                for v in args.values():
+                                    if isinstance(v, str) and "/" in v and len(v) < 300:
+                                        # Heuristic: looks like a file path
+                                        if v.startswith("/") or v.startswith("./") or "." in v.rsplit("/", 1)[-1]:
+                                            file_paths.add(v)
+                        if part.get("type") == "text" and role == "assistant":
+                            text = part.get("text", "").strip()
+                            if text:
+                                assistant_text_intros.append(text[:200])
+
+                if role == "user":
+                    text = _extract_text_from_message(msg)
+                    if text:
+                        user_messages.append(text[:300])
+    except OSError as e:
+        return {
+            "session_id": session_id,
+            "found": False,
+            "error": f"transcript read failed: {e}",
+        }
+
+    summary: dict = {
+        "session_id": session_id,
+        "transcript_path": str(transcript),
+        "transcript_size_kb": round(transcript.stat().st_size / 1024, 1),
+        "turns_by_role": dict(turns_by_role),
+        "top_tools_used": dict(tool_uses.most_common(15)),
+        "files_touched_count": len(file_paths),
+        "files_touched_sample": sorted(file_paths)[:30],
+        "user_messages_count": len(user_messages),
+        "user_messages_recent": user_messages[-10:],
+        "assistant_text_count": len(assistant_text_intros),
+        "assistant_text_recent_intros": assistant_text_intros[-10:],
+    }
+
+    if focus:
+        focused = query_transcript(session_id, focus, max_matches=10)
+        summary["focus_query"] = focus
+        summary["focus_matches"] = focused.get("matches", [])
+        summary["focus_match_count"] = focused.get("match_count", 0)
+
+    return summary
+
+
 def post_handoff(
     from_session_id: str,
     text: str,
