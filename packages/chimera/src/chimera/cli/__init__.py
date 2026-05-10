@@ -21,7 +21,7 @@ import sys
 from chimera import __version__
 
 from . import attach as attach_cmd
-from . import dev, doctor, install_hooks, mcp_serve, monitor, route, task
+from . import dev, doctor, install_hooks, mcp_serve, monitor, observer, route, task
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     mcp_serve.add_subparser(subparsers)
     install_hooks.add_subparser(subparsers)
     attach_cmd.add_subparser(subparsers)
+    observer.add_subparser(subparsers)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

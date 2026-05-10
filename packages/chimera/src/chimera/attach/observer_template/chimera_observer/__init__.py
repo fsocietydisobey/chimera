@@ -38,6 +38,7 @@ Registration approach:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -45,10 +46,21 @@ import threading
 import time
 import urllib.request
 import uuid
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlsplit
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
+
+# App-level run correlation. The app sets this via tag_run() to group all
+# downstream LangChain callbacks + external HTTP under one logical "run id"
+# regardless of how many per-callback UUIDs LangChain spawns. Without it,
+# querying "all events for app run X" required scanning every callback run
+# in the project's heartbeat buffer (jeevy Phase A validation needed this
+# pattern; took ~150 sub-run scans to reconstruct one logical 3-page run).
+_correlation_id: ContextVar[str | None] = ContextVar(
+    "chimera_correlation_id", default=None
+)
 
 _DEFAULT_ENDPOINT = "http://127.0.0.1:8740"
 _QUEUE_MAX = 1000
@@ -128,9 +140,49 @@ def _enqueue(event: str, run_id: Any, parent_run_id: Any = None,
             "event": event,
             "ts": time.time(),
             "extra": extra,
+            "correlation_id": _correlation_id.get(),
         })
     except queue.Full:
         pass
+
+
+@contextlib.contextmanager
+def tag_run(correlation_id: str):
+    """Tag every observer event in this scope with `correlation_id`.
+
+    Use to link your app-level run id to all the per-callback events
+    LangChain emits inside it (chain_start, llm_start, external_start,
+    etc.). The chimera daemon indexes events by correlation_id so you
+    can later query "all observer activity for app run X" with a single
+    GET /api/heartbeats/{project}/by-correlation/{cid}.
+
+    Example::
+
+        with chimera_observer.tag_run(my_run_id):
+            result = graph.invoke(state)
+
+    ContextVar-based — propagates through async/await and ThreadPoolExecutor
+    boundaries automatically. Same pattern LangChain uses for its tracer
+    context vars; works correctly across asyncio.gather + to_thread.
+
+    Nested tag_run calls are supported (inner overrides outer for the
+    inner scope; outer restored on exit).
+    """
+    token = _correlation_id.set(correlation_id)
+    try:
+        yield correlation_id
+    finally:
+        _correlation_id.reset(token)
+
+
+def set_correlation_id(correlation_id: str | None) -> None:
+    """Set correlation_id for the current context without a context manager.
+
+    Useful at process boundaries (FastAPI middleware, RQ worker entrypoint)
+    where a `with` block doesn't fit. Pair with set_correlation_id(None) at
+    the end of the request scope.
+    """
+    _correlation_id.set(correlation_id)
 
 
 def _try_get_handler_class():
@@ -369,6 +421,66 @@ def _patch_httpx() -> None:
         httpx.AsyncClient.send = patched_async_send  # type: ignore[method-assign]
 
 
+def _patch_langsmith_bypass() -> None:
+    """No-op LangSmith client uploads when CHIMERA_DISABLE_LANGSMITH=true.
+
+    LangChain's default tracer pings api.smith.langchain.com on every
+    chain/llm/tool boundary — observed ~72 calls per LangGraph run in
+    jeevy ingestion. If the user's only observability is chimera's own
+    HTTP instrumentation, those LangSmith calls are pure overhead:
+    bandwidth + per-call latency + (potentially) cost on the LangSmith
+    side.
+
+    This patches langsmith.client.Client.create_run / update_run /
+    multipart_ingest_runs to no-op. Apps that DO use LangSmith just
+    don't set the env var and behavior is unchanged.
+
+    Stdlib only — checks for langsmith installed, no-ops if absent. Each
+    method patched independently so partial-API mismatches don't break
+    the whole shim.
+    """
+    if os.environ.get("CHIMERA_DISABLE_LANGSMITH", "").lower() not in (
+        "1", "true", "yes"
+    ):
+        return  # opt-in; default is unchanged behavior
+    try:
+        from langsmith.client import Client  # type: ignore[import-not-found]
+    except ImportError:
+        return
+
+    def _noop(*args, **kwargs):  # noqa: ARG001
+        return None
+
+    async def _async_noop(*args, **kwargs):  # noqa: ARG001
+        return None
+
+    for method_name in (
+        "create_run",
+        "update_run",
+        "create_runs",
+        "update_runs",
+        "multipart_ingest_runs",
+        "batch_ingest_runs",
+    ):
+        method = getattr(Client, method_name, None)
+        if method is None:
+            continue
+        if getattr(method, "_chimera_bypassed", False):
+            continue
+        replacement = _async_noop if _is_async_callable(method) else _noop
+        replacement._chimera_bypassed = True  # type: ignore[attr-defined]
+        try:
+            setattr(Client, method_name, replacement)
+        except Exception:
+            pass
+
+
+def _is_async_callable(fn) -> bool:
+    import asyncio
+    import inspect
+    return asyncio.iscoroutinefunction(fn) or inspect.iscoroutinefunction(fn)
+
+
 def _patch_requests() -> None:
     """Wrap requests.Session.send to emit heartbeats. No-op if not installed."""
     try:
@@ -440,6 +552,10 @@ def attach() -> None:
         pass
     try:
         _patch_requests()
+    except Exception:
+        pass
+    try:
+        _patch_langsmith_bypass()
     except Exception:
         pass
 

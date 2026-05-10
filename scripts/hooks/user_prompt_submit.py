@@ -129,8 +129,14 @@ def _format_inbox(notes: list[dict], session_id: str) -> str:
         remaining = n.get("_remaining_surfaces")
         # 'answer' notes have answer text in `answer` field, not `text`.
         body = (n.get("answer") or n.get("text") or "").strip()
-        if len(body) > 600:
-            body = body[:600] + "…"
+        # 2500 chars (~625 tokens) — bounded by the 3-surface auto-expire.
+        # Previous 600-char limit truncated answers mid-content; receivers
+        # then reported "body cut off" without the key info even reaching
+        # them. Better to spend a few hundred extra tokens than lose the
+        # message. Notes longer than this are rare; if they happen, the
+        # receiver can call session_pending_notes manually for full body.
+        if len(body) > 2500:
+            body = body[:2500] + f"\n…[truncated, {len(body) - 2500} more chars — call session_pending_notes for full body]"
         question_text = (n.get("question_text") or "").strip()
         if question_text and len(question_text) > 200:
             question_text = question_text[:200] + "…"

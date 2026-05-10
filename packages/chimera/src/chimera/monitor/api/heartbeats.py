@@ -55,6 +55,69 @@ def build_router():
             ],
         }
 
+    # FastAPI matches routes in registration order. Specific paths
+    # (cost, slow, by-correlation) MUST come BEFORE the {run_id} catchall
+    # or they'll be absorbed (cost → run_id="cost" → 404 "no run 'cost'").
+    @router.get("/heartbeats/{project}/cost")
+    async def get_cost_summary(project: str) -> dict[str, Any]:
+        """Aggregate token counts → estimated USD by model + telemetry overhead.
+
+        Best-effort estimate based on public list prices. For invoice
+        accounting, query providers directly. Surfaces telemetry overhead
+        (LangSmith call count) as a separate line item — useful signal
+        even when no cost data is available.
+        """
+        return heartbeats.cost_summary(project)
+
+    @router.get("/heartbeats/{project}/slow")
+    async def get_slow_calls(
+        project: str,
+        chain: float | None = None,
+        llm: float | None = None,
+        tool: float | None = None,
+        external: float | None = None,
+    ) -> dict[str, Any]:
+        """Slow chain/llm/tool/external calls in `project`.
+
+        Per-kind thresholds (seconds) override defaults via query params.
+        Defaults: chain=30, llm=10, tool=5, external=30. Includes
+        in-flight calls already past threshold (i.e. stuck).
+        """
+        thresh: dict[str, float] = {}
+        if chain is not None:
+            thresh["chain"] = chain
+        if llm is not None:
+            thresh["llm"] = llm
+        if tool is not None:
+            thresh["tool"] = tool
+        if external is not None:
+            thresh["external"] = external
+        slow = heartbeats.find_slow_calls(project, thresh or None)
+        return {
+            "project": project,
+            "thresholds": {**heartbeats._SLOW_DEFAULTS, **thresh},
+            "count": len(slow),
+            "slow": slow,
+        }
+
+    @router.get("/heartbeats/{project}/by-correlation/{correlation_id}")
+    async def get_by_correlation(project: str, correlation_id: str) -> dict[str, Any]:
+        """All events tagged with `correlation_id` across all runs in project.
+
+        Pair this with the observer's `tag_run(correlation_id)` context
+        manager. App sets a logical run id via tag_run; observer stamps
+        every event with it; this endpoint returns the full chronological
+        timeline regardless of how many LangChain per-callback sub-runs
+        were spawned underneath.
+        """
+        events = heartbeats.events_by_correlation(project, correlation_id)
+        return {
+            "project": project,
+            "correlation_id": correlation_id,
+            "event_count": len(events),
+            "events": events,
+        }
+
     @router.get("/heartbeats/{project}/{run_id}")
     async def get_run(project: str, run_id: str) -> dict[str, Any]:
         entry = heartbeats.get(project, run_id)

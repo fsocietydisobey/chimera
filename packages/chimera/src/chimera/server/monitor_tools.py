@@ -741,6 +741,34 @@ async def session_log_question(
     )
 
 
+async def session_search_archive(
+    session_id: str,
+    query: str | None = None,
+    limit: int = 50,
+) -> str:
+    """Search archived inbox notes by substring."""
+    qstr = f"?q={urllib.parse.quote(query)}&limit={limit}" if query else f"?limit={limit}"
+    data = _get(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/inbox/archive{qstr}",
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    results = data.get("results", [])
+    if not results:
+        return f"📚 archive empty for query={query!r}"
+    lines = [f"📚 **{len(results)} archived note(s) matching {query!r}:**\n"]
+    for n in results:
+        kind = n.get("kind") or "note"
+        from_sid = (n.get("from_session_id") or "")[:8]
+        ts = n.get("ts", "")[:19]
+        body = (n.get("answer") or n.get("text") or "").strip()
+        if len(body) > 400:
+            body = body[:400] + "…"
+        lines.append(f"- [{ts} {kind} from {from_sid}] {body}")
+    return "\n".join(lines)
+
+
 async def session_ack_notes(
     session_id: str,
     note_ids: list[str] | None = None,

@@ -383,28 +383,43 @@ def recent_decisions(across_sessions: bool = True, recent_per_session: int = 5) 
 
 
 def pending_notes(session_id: str, mark_read: bool = True) -> list[dict]:
-    """A reads its inbox — answers other sessions have posted that A hasn't seen.
+    """A reads its inbox — unread notes from other sessions.
 
-    Called automatically by A's SessionStart hook so unread answers surface
-    in A's system prompt without the user having to know to ask. Setting
-    mark_read=False allows debug/inspect without consuming the note.
+    Called by /inbox skill (mark_read=true) and by old SessionStart hooks.
+    The newer auto-inject UserPromptSubmit hook uses surface_inbox_for_hook
+    (different path — peek + count, doesn't drain).
+
+    When mark_read=True, drained notes get moved to archive.jsonl (not
+    just marked read in inbox.jsonl) so the inbox stays focused on
+    current pending. History remains queryable via search_archive.
 
     `session_id` accepts either a UUID or a friendly name.
     """
     session_id = resolve_session_id(session_id)
-    inbox_path = _session_dir(session_id) / "inbox.jsonl"
+    sd = _session_dir(session_id)
+    inbox_path = sd / "inbox.jsonl"
+    archive_path = sd / "archive.jsonl"
     notes = _read_jsonl(inbox_path)
     pending = [n for n in notes if not n.get("read")]
 
     if mark_read and pending:
-        # Mark read in-place + atomic rewrite
+        archived: list[dict] = []
+        remaining: list[dict] = []
         for n in notes:
-            if not n.get("read"):
-                n["read"] = True
-                n["read_at"] = _now_iso()
+            if n.get("read"):
+                archived.append(n)
+                continue
+            n["read"] = True
+            n["read_at"] = _now_iso()
+            n["read_reason"] = n.get("read_reason") or "pending_notes_drain"
+            archived.append(n)
+
+        with archive_path.open("a", encoding="utf-8") as f:
+            for n in archived:
+                f.write(json.dumps(n, separators=(",", ":")) + "\n")
         tmp = inbox_path.with_suffix(".jsonl.tmp")
         with tmp.open("w", encoding="utf-8") as f:
-            for n in notes:
+            for n in remaining:
                 f.write(json.dumps(n, separators=(",", ":")) + "\n")
         tmp.replace(inbox_path)
 
@@ -469,19 +484,25 @@ def surface_inbox_for_hook(session_id: str) -> list[dict]:
 
     Differs from pending_notes: doesn't mark read on first fetch. Notes
     re-surface each turn until the agent explicitly acks (via
-    session_ack_notes) OR surface_count hits the auto-expire threshold.
+    session_ack_notes) OR surface_count hits the auto-expire threshold,
+    in which case they also get moved to archive.jsonl.
 
     Each returned note carries a `_remaining_surfaces` field so the hook
     can render urgency info ("[2/3 surfaces remaining — call ack]").
     """
     session_id = resolve_session_id(session_id)
-    inbox_path = _session_dir(session_id) / "inbox.jsonl"
+    sd = _session_dir(session_id)
+    inbox_path = sd / "inbox.jsonl"
+    archive_path = sd / "archive.jsonl"
     notes = _read_jsonl(inbox_path)
     surfaced: list[dict] = []
+    archived: list[dict] = []
+    remaining: list[dict] = []
     modified = False
 
     for n in notes:
         if n.get("read"):
+            archived.append(n)
             continue
         n["surface_count"] = int(n.get("surface_count") or 0) + 1
         modified = True
@@ -490,6 +511,9 @@ def surface_inbox_for_hook(session_id: str) -> list[dict]:
             n["read"] = True
             n["read_at"] = _now_iso()
             n["read_reason"] = "auto_after_surfaces"
+            archived.append(n)
+        else:
+            remaining.append(n)
 
         copy = dict(n)
         copy["_remaining_surfaces"] = max(
@@ -498,9 +522,13 @@ def surface_inbox_for_hook(session_id: str) -> list[dict]:
         surfaced.append(copy)
 
     if modified:
+        if archived:
+            with archive_path.open("a", encoding="utf-8") as f:
+                for n in archived:
+                    f.write(json.dumps(n, separators=(",", ":")) + "\n")
         tmp = inbox_path.with_suffix(".jsonl.tmp")
         with tmp.open("w", encoding="utf-8") as f:
-            for n in notes:
+            for n in remaining:
                 f.write(json.dumps(n, separators=(",", ":")) + "\n")
         tmp.replace(inbox_path)
 
@@ -511,39 +539,90 @@ def ack_notes(
     session_id: str,
     note_ids: list[str] | None = None,
 ) -> int:
-    """Explicitly mark inbox notes as read.
+    """Explicitly mark inbox notes as read AND move them to archive.
 
     Called by the agent after surfacing notice content to the user, so
     the same notice doesn't re-loop into context next turn. Pass
     `note_ids=None` to ack all currently-unread notes.
 
+    Read notes get moved from inbox.jsonl → archive.jsonl so the inbox
+    stays small (just current pending) while history remains greppable
+    via search_archive(). Past behavior left read notes in inbox.jsonl
+    forever — fine functionally but bloated the file over time.
+
     Returns the count of notes newly marked read.
     """
     session_id = resolve_session_id(session_id)
-    inbox_path = _session_dir(session_id) / "inbox.jsonl"
+    sd = _session_dir(session_id)
+    inbox_path = sd / "inbox.jsonl"
+    archive_path = sd / "archive.jsonl"
     notes = _read_jsonl(inbox_path)
     count = 0
 
     target_set = set(note_ids) if note_ids else None
+    archived: list[dict] = []
+    remaining: list[dict] = []
 
     for n in notes:
         if n.get("read"):
+            archived.append(n)  # already-read notes also archive cleanly
             continue
         if target_set is not None and n.get("id") not in target_set:
+            remaining.append(n)
             continue
         n["read"] = True
         n["read_at"] = _now_iso()
         n["read_reason"] = "agent_ack"
+        archived.append(n)
         count += 1
 
-    if count > 0:
+    if archived:
+        # Append to archive (preserves archive history across multiple acks)
+        with archive_path.open("a", encoding="utf-8") as f:
+            for n in archived:
+                f.write(json.dumps(n, separators=(",", ":")) + "\n")
+        # Rewrite inbox with only the still-unread/unmatched notes
         tmp = inbox_path.with_suffix(".jsonl.tmp")
         with tmp.open("w", encoding="utf-8") as f:
-            for n in notes:
+            for n in remaining:
                 f.write(json.dumps(n, separators=(",", ":")) + "\n")
         tmp.replace(inbox_path)
 
     return count
+
+
+def search_archive(
+    session_id: str,
+    query: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Search archived (already-read) inbox notes by substring match.
+
+    Closes the "what did chimera-builder say about Roboflow last week?"
+    workflow — read notes were previously lost to inbox.jsonl bloat.
+    With ack_notes archiving them, this returns matching past notes.
+
+    `query` is a case-insensitive substring match against the note's
+    body field (`answer` for kind="answer", `text` for kind="notice")
+    AND its question_text if present. Pass None to return all archived
+    notes (most-recent-first).
+
+    `limit` caps the result set; archive can grow large over time.
+    """
+    session_id = resolve_session_id(session_id)
+    archive_path = _session_dir(session_id) / "archive.jsonl"
+    archived = _read_jsonl(archive_path)
+
+    if query:
+        q = query.lower()
+        def _matches(n: dict) -> bool:
+            body = (n.get("answer") or n.get("text") or "").lower()
+            qtext = (n.get("question_text") or "").lower()
+            return q in body or q in qtext
+        archived = [n for n in archived if _matches(n)]
+
+    archived.sort(key=lambda n: n.get("ts", ""), reverse=True)
+    return archived[:limit]
 
 
 async def wait_for_answer(

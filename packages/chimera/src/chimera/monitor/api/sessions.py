@@ -195,4 +195,22 @@ def build_router():
         count = sessions.ack_notes(session_id, req.note_ids)
         return {"acked": count}
 
+    @router.get("/sessions/{session_id}/inbox/archive")
+    async def search_inbox_archive(
+        session_id: str,
+        q: str | None = None,
+        limit: int = 50,
+    ) -> dict:
+        """Search archived (read) inbox notes by substring.
+
+        Read notes get moved from inbox.jsonl → archive.jsonl on ack /
+        drain / auto-expire. This endpoint exposes archive history so
+        you can query "what did session X say about topic Y" without
+        losing past cross-session context.
+        """
+        return {
+            "query": q,
+            "results": sessions.search_archive(session_id, q, limit),
+        }
+
     return router

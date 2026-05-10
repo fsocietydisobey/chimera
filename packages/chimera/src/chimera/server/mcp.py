@@ -1640,6 +1640,30 @@ async def session_log_question(
 
 
 @mcp.tool()
+@logged_tool("session_search_archive")
+async def session_search_archive(
+    session_id: str,
+    query: str | None = None,
+    limit: int = 50,
+) -> str:
+    """Search archived (already-read) inbox notes by substring.
+
+    When inbox notes get acked / drained / auto-expire, they move from
+    inbox.jsonl to archive.jsonl. This tool exposes the history so you
+    can query "what did chimera-builder say about Roboflow last week"
+    without losing context to past inbox drains.
+
+    Args:
+        session_id: this session's id (whose archive to search).
+        query: case-insensitive substring match against note bodies and
+            question_text. None returns all archived notes (most-recent
+            first).
+        limit: cap result set (default 50).
+    """
+    return await _monitor_tools.session_search_archive(session_id, query, limit)
+
+
+@mcp.tool()
 @logged_tool("session_ack_notes")
 async def session_ack_notes(
     session_id: str,
