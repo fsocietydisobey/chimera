@@ -225,34 +225,90 @@ def _consume_handoffs(session_id: str, cwd: str) -> list[dict]:
 
 
 def _format_handoffs(handoffs: list[dict], cwd: str) -> str:
-    lines = [
-        f"📦 chimera handoffs — {len(handoffs)} directive(s) from prior session(s) in this project ({cwd}):",
-        "",
-    ]
-    for h in handoffs:
-        from_id = (h.get("from_session_id") or "?")[:8]
-        ts = (h.get("ts") or "")[:19]
-        text = (h.get("text") or "").strip()
-        lines.append(f"- [{ts} from {from_id}]")
-        lines.append(f"  {text}")
+    # Split by role assigned during consume: this session may have
+    # auto-claimed ownership of fresh handoffs OR be an observer on
+    # handoffs already claimed by another session.
+    owned = [h for h in handoffs if h.get("_claim_role") == "owner"]
+    observed = [h for h in handoffs if h.get("_claim_role") == "observer"]
+
+    lines: list[str] = []
+
+    # --- OWNED handoffs — full directive framing ---
+    if owned:
+        lines.append(
+            f"📦 chimera handoffs — {len(owned)} directive(s) you now OWN "
+            f"in this project ({cwd}):"
+        )
         lines.append("")
+        for h in owned:
+            from_id = (h.get("from_session_id") or "?")[:8]
+            ts = (h.get("ts") or "")[:19]
+            text = (h.get("text") or "").strip()
+            lines.append(f"- [handoff {h['id'][:8]} · {ts} · from {from_id}]")
+            lines.append(f"  {text}")
+            lines.append("")
+        lines.append(
+            "**You are the PRIMARY OWNER of the handoff(s) above.** Your job:\n"
+            "  1. Read referenced files / specs first.\n"
+            "  2. Propose a concrete first action — pick the highest-priority "
+            "item, summarize it in one sentence, file/line where you'll start.\n"
+            "  3. Then START. Don't wait for \"yes do that\" — the handoff IS "
+            "the authorization.\n"
+            "  4. If ambiguous, ask ONE clarifying question — don't enumerate.\n"
+            "  5. As you make decisions, call `session_log_decision` — "
+            "subscribers (other sessions observing this handoff) will see "
+            "your progress in their inboxes automatically.\n"
+            "  6. If you finish or realize this isn't your lane, call "
+            "`session_release_handoff(id)` so the next session in scope "
+            "can pick it up."
+        )
+
+    # --- OBSERVED handoffs — owner already exists ---
+    if observed:
+        if owned:
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+        lines.append(
+            f"👀 chimera handoffs — {len(observed)} ALREADY-CLAIMED handoff(s) "
+            f"visible in this project ({cwd}):"
+        )
+        lines.append("")
+        for h in observed:
+            from_id = (h.get("from_session_id") or "?")[:8]
+            owner = (h.get("_owner_session_id") or h.get("owner_session_id") or "?")[:8]
+            ts = (h.get("ts") or "")[:19]
+            text = (h.get("text") or "").strip()
+            sub_count = len(h.get("subscribers") or [])
+            lines.append(
+                f"- [handoff {h['id'][:8]} · {ts} · from {from_id} · "
+                f"OWNED BY session {owner} · {sub_count} subscriber(s)]"
+            )
+            lines.append(f"  {text[:400]}{'…' if len(text) > 400 else ''}")
+            lines.append("")
+        lines.append(
+            "**These handoffs are ALREADY OWNED by another session.** Default: "
+            "do NOT pick items from these. Your options:\n"
+            "  • **Subscribe** to receive owner's progress in your inbox: "
+            "`session_subscribe_handoff(handoff_id, session_id)`. Use when "
+            "you want to observe, offer review, or be available for sub-tasks.\n"
+            "  • **Read owner's state**: `session_state(<owner_session_id>)` "
+            "or `session_query_transcript` for what they've already done.\n"
+            "  • **Send the owner a notice** if you spot something relevant: "
+            "`session_post_notice(target_session_id=<owner>, text=...)`.\n"
+            "  • **Stand down** and work on something else.\n"
+            "\n"
+            "Don't duplicate the owner's work. Propose your role (subscribe / "
+            "observe / stand down) in your first response."
+        )
+
+    if not lines:
+        return ""
+    lines.append("")
     lines.append(
-        "**These are not informational — they're work the prior session left "
-        "specifically for whoever picks up here.** Your job this turn:\n"
-        "  1. Read any files / specs the handoff(s) reference.\n"
-        "  2. Propose a concrete first action — pick the highest-priority "
-        "item, summarize it in one sentence, and state which file/line "
-        "you're going to start at.\n"
-        "  3. Then START. Don't wait for the user to say \"yes do that\" — "
-        "the handoff IS the authorization. The user knows what's in scope "
-        "(they posted it) and will redirect if you're heading the wrong "
-        "way.\n"
-        "  4. If the handoff is genuinely ambiguous about which item to "
-        "tackle first, ask ONE clarifying question — don't list options.\n"
-        "\n"
         "Each handoff was marked read by this session — they won't re-"
-        "surface on resume. If you need them again, query session_state "
-        "of the sender."
+        "surface on resume. If you need them again, query the daemon API "
+        "directly or use `session_state` of the sender."
     )
     return "\n".join(lines).rstrip()
 

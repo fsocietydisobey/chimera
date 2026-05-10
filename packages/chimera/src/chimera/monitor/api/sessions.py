@@ -265,8 +265,38 @@ def build_router():
 
     @router.get("/handoffs/consume")
     async def consume_handoffs(session_id: str, cwd: str) -> dict:
-        """Return handoffs matching cwd; mark this session_id as having read."""
+        """Return handoffs matching cwd; mark this session_id as having read.
+        First consumer of an unclaimed handoff auto-claims as owner."""
         return {"handoffs": sessions.consume_handoffs(session_id, cwd)}
+
+    @router.get("/handoffs/in-scope")
+    async def list_handoffs_in_scope(session_id: str, cwd: str) -> dict:
+        """Read-only list of handoffs visible from this cwd, with owner +
+        subscriber summary. Doesn't mark anything read; for inspection."""
+        return {"handoffs": sessions.list_handoffs_in_scope(session_id, cwd)}
+
+    @router.post("/handoffs/{handoff_id}/subscribe")
+    async def subscribe_handoff(handoff_id: str, req: dict) -> dict:
+        """Session subscribes to owner's progress for this handoff."""
+        try:
+            return sessions.subscribe_handoff(handoff_id, req["session_id"])
+        except ValueError as e:
+            raise fastapi.HTTPException(404, str(e))
+
+    @router.post("/handoffs/{handoff_id}/unsubscribe")
+    async def unsubscribe_handoff(handoff_id: str, req: dict) -> dict:
+        try:
+            return sessions.unsubscribe_handoff(handoff_id, req["session_id"])
+        except ValueError as e:
+            raise fastapi.HTTPException(404, str(e))
+
+    @router.post("/handoffs/{handoff_id}/release")
+    async def release_handoff(handoff_id: str, req: dict) -> dict:
+        """Owner releases the handoff; next consumer becomes owner."""
+        try:
+            return sessions.release_handoff(handoff_id, req["session_id"])
+        except ValueError as e:
+            raise fastapi.HTTPException(404, str(e))
 
     @router.get("/sessions/{session_id}/transcript/query")
     async def query_session_transcript(

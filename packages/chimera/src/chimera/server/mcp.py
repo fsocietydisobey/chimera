@@ -1745,6 +1745,43 @@ async def session_summarize_transcript(
 
 
 @mcp.tool()
+@logged_tool("session_subscribe_handoff")
+async def session_subscribe_handoff(handoff_id: str, session_id: str) -> str:
+    """**Collaboration: subscribe to a handoff already claimed by another session.**
+
+    When your SessionStart hook shows a 👀 "ALREADY-CLAIMED" handoff,
+    subscribing means: every time the owner logs a decision via
+    session_log_decision, you receive a notice in your inbox
+    automatically. Lets multiple sessions collaborate on the same
+    work — one is primary, others observe + offer support.
+
+    Args:
+        handoff_id: 12-char hex id of the handoff to subscribe to.
+        session_id: your session's id.
+    """
+    return await _monitor_tools.session_subscribe_handoff(handoff_id, session_id)
+
+
+@mcp.tool()
+@logged_tool("session_unsubscribe_handoff")
+async def session_unsubscribe_handoff(handoff_id: str, session_id: str) -> str:
+    """Stop receiving owner's progress updates for a handoff."""
+    return await _monitor_tools.session_unsubscribe_handoff(handoff_id, session_id)
+
+
+@mcp.tool()
+@logged_tool("session_release_handoff")
+async def session_release_handoff(handoff_id: str, session_id: str) -> str:
+    """**Owner steps aside.** Next session in scope becomes the new owner.
+
+    Use when you've finished your part, realized this isn't your lane,
+    or want to pass the baton to a fresh session. Subscribers stay
+    subscribed.
+    """
+    return await _monitor_tools.session_release_handoff(handoff_id, session_id)
+
+
+@mcp.tool()
 @logged_tool("session_post_handoff")
 async def session_post_handoff(
     from_session_id: str,

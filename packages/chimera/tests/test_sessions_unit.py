@@ -148,6 +148,113 @@ def test_consume_handoffs_unrelated_cwd_no_match(isolated_state, tmp_path):
     assert matched == []
 
 
+def test_consume_handoffs_auto_claims_first_consumer_as_owner(isolated_state, tmp_path):
+    """First session in scope auto-claims as owner; subsequent sessions are
+    observers. Closes the collision pattern where multiple sessions in the
+    same project cwd each tried to act on the same handoff."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+    isolated_state.post_handoff(
+        asker, text="test", scope_cwd=str(project), expires_in_hours=24,
+    )
+
+    # First consumer becomes owner
+    first = isolated_state.consume_handoffs("session-A", str(project))
+    assert len(first) == 1
+    assert first[0]["_claim_role"] == "owner"
+    assert first[0]["owner_session_id"] == "session-A"
+
+    # Second consumer is observer
+    second = isolated_state.consume_handoffs("session-B", str(project))
+    assert len(second) == 1
+    assert second[0]["_claim_role"] == "observer"
+    assert second[0]["_owner_session_id"] == "session-A"
+
+
+def test_subscribe_handoff_idempotent(isolated_state, tmp_path):
+    """subscribe_handoff is idempotent — calling twice doesn't duplicate."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+    h = isolated_state.post_handoff(
+        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+    )
+
+    isolated_state.subscribe_handoff(h["id"], "observer-session")
+    isolated_state.subscribe_handoff(h["id"], "observer-session")  # duplicate
+
+    handoffs = isolated_state._read_jsonl(isolated_state._HANDOFFS_PATH)
+    found = next(x for x in handoffs if x["id"] == h["id"])
+    assert found["subscribers"] == ["observer-session"]
+
+
+def test_log_decision_broadcasts_to_handoff_subscribers(isolated_state, tmp_path):
+    """When owner logs a decision, subscribers' inboxes receive a notice."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+    h = isolated_state.post_handoff(
+        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+    )
+    # Consume claims owner
+    isolated_state.consume_handoffs("owner-session", str(project))
+    # Materialize subscriber session + subscribe
+    isolated_state.log_decision("subscriber-session", "init", "")
+    isolated_state.subscribe_handoff(h["id"], "subscriber-session")
+
+    # Owner logs a decision — should fan out to subscriber's inbox
+    isolated_state.log_decision("owner-session", "starting bug fix in foo.py", "step 1")
+
+    pending = isolated_state.pending_notes("subscriber-session", mark_read=False)
+    assert len(pending) >= 1
+    # Match the broadcast notice (filter out the asker's earlier log_decision
+    # which doesn't broadcast because asker doesn't own this handoff)
+    broadcasts = [n for n in pending if "handoff" in (n.get("text") or "")]
+    assert len(broadcasts) == 1
+    assert "decision" in broadcasts[0]["text"]
+    assert "starting bug fix" in broadcasts[0]["text"]
+
+
+def test_release_handoff_clears_owner(isolated_state, tmp_path):
+    """Owner releases → owner_session_id becomes None → next consumer claims."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+    h = isolated_state.post_handoff(
+        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+    )
+    isolated_state.consume_handoffs("session-A", str(project))
+    isolated_state.release_handoff(h["id"], "session-A")
+
+    # Re-read; owner should be None
+    handoffs = isolated_state._read_jsonl(isolated_state._HANDOFFS_PATH)
+    found = next(x for x in handoffs if x["id"] == h["id"])
+    assert found["owner_session_id"] is None
+
+    # Next consumer (different session) becomes the new owner
+    next_consume = isolated_state.consume_handoffs("session-C", str(project))
+    # session-A is already in read_by, so they don't re-receive. session-C
+    # is fresh.
+    assert len(next_consume) == 1
+    assert next_consume[0]["_claim_role"] == "owner"
+    assert next_consume[0]["owner_session_id"] == "session-C"
+
+
+def test_release_handoff_rejects_non_owner(isolated_state, tmp_path):
+    """Only the owner can release a handoff."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+    h = isolated_state.post_handoff(
+        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+    )
+    isolated_state.consume_handoffs("session-A", str(project))
+
+    with pytest.raises(ValueError, match="doesn't own"):
+        isolated_state.release_handoff(h["id"], "not-the-owner")
+
+
 def test_consume_handoffs_expired_dropped(isolated_state, tmp_path, monkeypatch):
     """Expired handoffs are not surfaced AND dropped on next consume."""
     import time as time_mod

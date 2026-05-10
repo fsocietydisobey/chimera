@@ -912,6 +912,42 @@ async def session_summarize_transcript(
     return "\n".join(lines)
 
 
+async def session_subscribe_handoff(handoff_id: str, session_id: str) -> str:
+    """Subscribe to receive owner's decisions in your inbox automatically."""
+    data = _post(
+        f"/api/handoffs/{urllib.parse.quote(handoff_id)}/subscribe",
+        {"session_id": session_id},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return f"👀 subscribed to handoff {handoff_id[:8]} — owner's decisions will land in your inbox"
+
+
+async def session_unsubscribe_handoff(handoff_id: str, session_id: str) -> str:
+    """Stop receiving owner's progress updates for this handoff."""
+    data = _post(
+        f"/api/handoffs/{urllib.parse.quote(handoff_id)}/unsubscribe",
+        {"session_id": session_id},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return f"🔕 unsubscribed from handoff {handoff_id[:8]}"
+
+
+async def session_release_handoff(handoff_id: str, session_id: str) -> str:
+    """Owner steps aside; next session to consume becomes new owner."""
+    data = _post(
+        f"/api/handoffs/{urllib.parse.quote(handoff_id)}/release",
+        {"session_id": session_id},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return f"✋ released ownership of handoff {handoff_id[:8]}; next session to consume becomes owner"
+
+
 async def session_post_handoff(
     from_session_id: str,
     text: str,

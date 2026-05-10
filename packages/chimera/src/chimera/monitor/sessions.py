@@ -89,7 +89,8 @@ def _now_iso() -> str:
 
 def log_decision(session_id: str, text: str, why: str = "") -> dict:
     """Record a decision the agent has made. Surfaces to other sessions
-    via session_state(session_id)."""
+    via session_state(session_id). If this session owns any handoff,
+    decision is also broadcast to that handoff's subscribers."""
     record = {
         "ts": _now_iso(),
         "id": uuid.uuid4().hex[:12],
@@ -97,6 +98,11 @@ def log_decision(session_id: str, text: str, why: str = "") -> dict:
         "why": why,
     }
     _append_jsonl(_session_dir(session_id) / "decisions.jsonl", record)
+    # Fan out to handoff subscribers — best-effort, non-blocking
+    try:
+        _broadcast_to_handoff_subscribers(session_id, "decision", text)
+    except Exception:
+        pass
     log.info("session %s: decision recorded — %s", session_id, text[:80])
     return record
 
@@ -837,6 +843,175 @@ def post_handoff(
     return handoff
 
 
+def subscribe_handoff(handoff_id: str, session_id: str) -> dict:
+    """Session opts into receiving owner's progress updates for a handoff.
+
+    Use case: user opens a second/third session in a project where a
+    handoff is already being worked on by an owner. The new session
+    subscribes; whenever owner logs a decision, subscribers see it in
+    their inbox automatically. Lets multiple sessions collaborate on
+    the same handoff without colliding on the primary work.
+
+    Idempotent — subscribing twice is a no-op.
+    """
+    if not _HANDOFFS_PATH.exists():
+        raise ValueError(f"No handoff with id {handoff_id!r}")
+
+    session_id = resolve_session_id(session_id)
+    handoffs = _read_jsonl(_HANDOFFS_PATH)
+    matched: dict | None = None
+    for h in handoffs:
+        if h.get("id") == handoff_id:
+            subscribers = h.setdefault("subscribers", [])
+            if session_id not in subscribers:
+                subscribers.append(session_id)
+            matched = h
+            break
+
+    if matched is None:
+        raise ValueError(
+            f"No handoff with id {handoff_id!r}. Use list_handoffs to see "
+            f"available handoffs in your cwd."
+        )
+
+    tmp = _HANDOFFS_PATH.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for h in handoffs:
+            f.write(json.dumps(h, separators=(",", ":")) + "\n")
+    tmp.replace(_HANDOFFS_PATH)
+    return matched
+
+
+def unsubscribe_handoff(handoff_id: str, session_id: str) -> dict:
+    """Remove a session from a handoff's subscriber list."""
+    if not _HANDOFFS_PATH.exists():
+        raise ValueError(f"No handoff with id {handoff_id!r}")
+
+    session_id = resolve_session_id(session_id)
+    handoffs = _read_jsonl(_HANDOFFS_PATH)
+    matched: dict | None = None
+    for h in handoffs:
+        if h.get("id") == handoff_id:
+            subscribers = h.get("subscribers") or []
+            if session_id in subscribers:
+                subscribers.remove(session_id)
+                h["subscribers"] = subscribers
+            matched = h
+            break
+
+    if matched is None:
+        raise ValueError(f"No handoff with id {handoff_id!r}")
+
+    tmp = _HANDOFFS_PATH.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for h in handoffs:
+            f.write(json.dumps(h, separators=(",", ":")) + "\n")
+    tmp.replace(_HANDOFFS_PATH)
+    return matched
+
+
+def release_handoff(handoff_id: str, session_id: str) -> dict:
+    """Owner steps aside; next session to consume the handoff becomes owner.
+
+    Use when you've finished your part or realized this isn't your lane.
+    Subscribers stay subscribed (still observers); only the owner slot
+    clears.
+    """
+    if not _HANDOFFS_PATH.exists():
+        raise ValueError(f"No handoff with id {handoff_id!r}")
+
+    session_id = resolve_session_id(session_id)
+    handoffs = _read_jsonl(_HANDOFFS_PATH)
+    matched: dict | None = None
+    for h in handoffs:
+        if h.get("id") == handoff_id:
+            if h.get("owner_session_id") != session_id:
+                raise ValueError(
+                    f"Session {session_id!r} doesn't own handoff "
+                    f"{handoff_id!r}; owner is "
+                    f"{h.get('owner_session_id') or 'unset'}."
+                )
+            h["owner_session_id"] = None
+            matched = h
+            break
+
+    if matched is None:
+        raise ValueError(f"No handoff with id {handoff_id!r}")
+
+    tmp = _HANDOFFS_PATH.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for h in handoffs:
+            f.write(json.dumps(h, separators=(",", ":")) + "\n")
+    tmp.replace(_HANDOFFS_PATH)
+    return matched
+
+
+def _broadcast_to_handoff_subscribers(
+    owner_session_id: str,
+    kind: str,
+    text: str,
+) -> None:
+    """Drop a notice into every subscriber of every handoff this session owns.
+
+    Called by log_decision/log_touch/set_status so subscribers see owner's
+    progress in their inboxes automatically. Subscribers can unsubscribe if
+    they want to mute. Silent on every failure path — never block the
+    owner's work on a broadcast issue.
+    """
+    if not _HANDOFFS_PATH.exists():
+        return
+    try:
+        handoffs = _read_jsonl(_HANDOFFS_PATH)
+    except OSError:
+        return
+
+    owned = [h for h in handoffs if h.get("owner_session_id") == owner_session_id]
+    if not owned:
+        return
+
+    for h in owned:
+        subscribers = h.get("subscribers") or []
+        for sub_id in subscribers:
+            try:
+                note = {
+                    "id": uuid.uuid4().hex[:12],
+                    "ts": _now_iso(),
+                    "kind": "notice",
+                    "text": f"[handoff {h['id'][:8]} progress] {kind}: {text[:300]}",
+                    "from_session_id": owner_session_id,
+                    "read": False,
+                    "surface_count": 0,
+                }
+                _append_jsonl(_session_dir(sub_id) / "inbox.jsonl", note)
+            except Exception:
+                pass  # subscriber may have been deleted; skip
+
+
+def list_handoffs_in_scope(session_id: str, cwd: str) -> list[dict]:
+    """List handoffs visible from this cwd, with owner + subscriber summaries.
+
+    Distinct from consume_handoffs: read-only, doesn't mark read,
+    surfaces full state (owner, subscriber count, claim status).
+    """
+    if not _HANDOFFS_PATH.exists():
+        return []
+    cwd_abs = os.path.abspath(cwd)
+    handoffs = _read_jsonl(_HANDOFFS_PATH)
+    now = time.time()
+    out: list[dict] = []
+
+    for h in handoffs:
+        if h.get("expires_at", 0) < now:
+            continue
+        scope = h.get("scope_cwd") or ""
+        if cwd_abs != scope and not cwd_abs.startswith(scope.rstrip("/") + "/"):
+            continue
+        out.append(h)
+
+    out.sort(key=lambda h: h.get("ts", ""), reverse=True)
+    return out
+
+
 def consume_handoffs(session_id: str, cwd: str) -> list[dict]:
     """Return handoffs matching this session's cwd; mark this session as
     having read them (no double-surface on session resume).
@@ -869,6 +1044,19 @@ def consume_handoffs(session_id: str, cwd: str) -> list[dict]:
         read_by = h.get("read_by") or []
         if session_id in read_by:
             continue
+
+        # AUTO-CLAIM: first session to consume becomes owner. Subsequent
+        # sessions get the handoff with owner info attached so they can
+        # decide to subscribe (collaborate) or stand down. The session
+        # sees this distinction in its SessionStart hook output.
+        existing_owner = h.get("owner_session_id")
+        if not existing_owner:
+            h["owner_session_id"] = session_id
+            h["_claim_role"] = "owner"  # transient flag for the hook
+        else:
+            h["_claim_role"] = "observer"
+            h["_owner_session_id"] = existing_owner
+
         matched.append(h)
         h["read_by"] = read_by + [session_id]
         needs_rewrite = True
