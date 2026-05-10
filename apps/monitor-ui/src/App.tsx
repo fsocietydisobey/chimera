@@ -1,5 +1,7 @@
 import { Route, Routes } from "react-router-dom";
 
+import { CostDashboard } from "@/components/observer/CostDashboard";
+import { TraceWaterfall } from "@/components/observer/TraceWaterfall";
 import { ProjectIndex } from "@/components/projects/ProjectIndex";
 import { ProjectView } from "@/components/project/ProjectView";
 import { MonitorShell } from "@/components/shell/MonitorShell";
@@ -10,6 +12,8 @@ export default function App() {
       <Route element={<MonitorShell />}>
         <Route index element={<ProjectIndex />} />
         <Route path=":name" element={<ProjectView />} />
+        <Route path=":name/cost" element={<CostDashboard />} />
+        <Route path=":name/trace/:correlationId" element={<TraceWaterfall />} />
       </Route>
     </Routes>
   );

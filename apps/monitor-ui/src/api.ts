@@ -119,6 +119,76 @@ export interface ThreadDetailResponse {
   checkpoints: CheckpointDetail[];
 }
 
+// ---------------------------------------------------------------------------
+// Observer / heartbeat API — populated by chimera_observer (v0.4.0+) on the
+// app side, served by chimera-monitor. Wraps three new endpoints landed in
+// commit 77156cf:
+//   GET /api/heartbeats/{project}/cost
+//   GET /api/heartbeats/{project}/slow
+//   GET /api/heartbeats/{project}/by-correlation/{cid}
+//
+// The cost dashboard + trace waterfall views consume these.
+// ---------------------------------------------------------------------------
+
+export interface CostByModel {
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  calls: number;
+}
+
+export interface CostSummary {
+  project: string;
+  run_count: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_usd: number;
+  by_model: Record<string, CostByModel>;
+  telemetry_calls_langsmith: number;
+  note: string;
+}
+
+export interface SlowCall {
+  kind: "chain" | "llm" | "tool" | "external";
+  run_id: string;
+  name: string | null;
+  started_ts: number;
+  ended_ts: number | null;
+  in_flight: boolean;
+  duration_ms: number;
+  threshold_ms: number;
+  project: string;
+  correlation_id: string | null;
+  extra: Record<string, unknown> | null;
+}
+
+export interface SlowCallsResponse {
+  project: string;
+  thresholds: Record<string, number>;
+  count: number;
+  slow: SlowCall[];
+}
+
+export interface ObserverEvent {
+  project: string;
+  run_id: string | null;
+  parent_run_id: string | null;
+  name: string | null;
+  event: string;            // "chain_start" | "chain_end" | "llm_start" | "llm_end" |
+                            // "tool_start" | "tool_end" | "external_start" |
+                            // "external_end" | "external_error" | <error variants>
+  ts: number;               // unix seconds, fractional
+  extra: Record<string, unknown> | null;
+  correlation_id: string | null;
+}
+
+export interface CorrelationResponse {
+  project: string;
+  correlation_id: string;
+  event_count: number;
+  events: ObserverEvent[];
+}
+
 // RTK Query slice. Live updates are via `pollingInterval: 2000` per query
 // (not SSE — that lands in Phase 2). Two seconds is the spec's "live update
 // within 2s" target, met identically by polling at this volume.
@@ -150,6 +220,30 @@ export const monitorApi = createApi({
       query: ({ name, threadId, limit = 20 }) =>
         `/threads/${encodeURIComponent(name)}/${encodeURIComponent(threadId)}?limit=${limit}`,
     }),
+    getCostSummary: build.query<CostSummary, string>({
+      query: (project) => `/heartbeats/${encodeURIComponent(project)}/cost`,
+    }),
+    getSlowCalls: build.query<
+      SlowCallsResponse,
+      { project: string; chain?: number; llm?: number; tool?: number; external?: number }
+    >({
+      query: ({ project, chain, llm, tool, external }) => {
+        const params = new URLSearchParams();
+        if (chain !== undefined) params.set("chain", String(chain));
+        if (llm !== undefined) params.set("llm", String(llm));
+        if (tool !== undefined) params.set("tool", String(tool));
+        if (external !== undefined) params.set("external", String(external));
+        const qs = params.toString();
+        return `/heartbeats/${encodeURIComponent(project)}/slow${qs ? `?${qs}` : ""}`;
+      },
+    }),
+    getEventsByCorrelation: build.query<
+      CorrelationResponse,
+      { project: string; correlationId: string }
+    >({
+      query: ({ project, correlationId }) =>
+        `/heartbeats/${encodeURIComponent(project)}/by-correlation/${encodeURIComponent(correlationId)}`,
+    }),
   }),
 });
 
@@ -158,4 +252,7 @@ export const {
   useGetTopologyQuery,
   useListThreadsQuery,
   useGetThreadDetailQuery,
+  useGetCostSummaryQuery,
+  useGetSlowCallsQuery,
+  useGetEventsByCorrelationQuery,
 } = monitorApi;
