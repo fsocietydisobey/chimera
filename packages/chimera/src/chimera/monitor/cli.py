@@ -105,9 +105,44 @@ def _cmd_start(args: argparse.Namespace) -> int:
 
     print(f"chimera monitor started (PID {pid}) — http://127.0.0.1:{port}")
     print(f"logs: {LOG_FILE}")
+    _maybe_nudge_about_supervisor()
     if not args.no_browser:
         webbrowser.open(f"http://127.0.0.1:{port}")
     return 0
+
+
+def _maybe_nudge_about_supervisor() -> None:
+    """One-line tip on `chimera monitor start` if no supervisor is active.
+
+    Closes the gap that bit Joseph repeatedly: daemon was up, then
+    died (OOM / SIGKILL / something), nothing restarted it, so the
+    whole stack silently broke. With systemd unit active, dies are
+    auto-recovered within RestartSec=5.
+
+    Suppressible via CHIMERA_QUIET_NUDGE=1 for scripted environments.
+    """
+    if os.environ.get("CHIMERA_QUIET_NUDGE"):
+        return
+    if sys.platform != "linux":
+        # On macOS, the analog is launchd — we don't ship a launchd
+        # template yet, so the nudge would point at the cross-platform
+        # `chimera monitor watch` instead.
+        print("tip: `chimera monitor watch` in a tmux/screen pane for auto-restart")
+        return
+    import shutil
+    import subprocess
+    if not shutil.which("systemctl"):
+        return  # systemd not available — skip nudge
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", "chimera-monitor"],
+            capture_output=True, text=True, timeout=1.5,
+        )
+        if result.stdout.strip() == "active":
+            return  # supervised already; no nudge needed
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return  # If we can't tell, don't nudge — might be misleading
+    print("tip: `chimera monitor install-service --enable` to auto-restart on crash + boot")
 
 
 def _cmd_restart(args: argparse.Namespace) -> int:
