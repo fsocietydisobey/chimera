@@ -50,16 +50,33 @@ from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlsplit
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
-# App-level run correlation. The app sets this via tag_run() to group all
-# downstream LangChain callbacks + external HTTP under one logical "run id"
-# regardless of how many per-callback UUIDs LangChain spawns. Without it,
-# querying "all events for app run X" required scanning every callback run
-# in the project's heartbeat buffer (jeevy Phase A validation needed this
-# pattern; took ~150 sub-run scans to reconstruct one logical 3-page run).
+# App-level run correlation. Two paths to populate it:
+#
+# 1. AUTO (default, zero-touch): when LangChain fires on_chain_start with
+#    parent_run_id=None (top-level chain — i.e. graph.invoke), our tracer
+#    sets _correlation_id to that run_id. Every downstream event in the
+#    same context (sub-chains, llms, tools, AND external HTTP calls
+#    captured by our httpx/requests monkey-patches) inherits that
+#    correlation_id via ContextVar. App code unchanged.
+#
+# 2. EXPLICIT (override): app calls `with tag_run(my_id)` to use a
+#    domain-specific id (deliverable_id, business txn id, etc.) instead
+#    of LangChain's UUID. tag_run wins over auto when both are present.
+#
+# Without correlation_id, querying "all events for app run X" required
+# scanning every callback run in the heartbeat buffer (jeevy Phase A
+# validation needed this — took ~150 sub-run scans to reconstruct one
+# logical 3-page run).
 _correlation_id: ContextVar[str | None] = ContextVar(
     "chimera_correlation_id", default=None
+)
+# Tracks whether the current scope's correlation_id was set by tag_run
+# (explicit) or auto-set by on_chain_start. Auto-set values get cleared
+# on on_chain_end of the same top-level run; explicit values don't.
+_correlation_auto: ContextVar[bool] = ContextVar(
+    "chimera_correlation_auto", default=False
 )
 
 _DEFAULT_ENDPOINT = "http://127.0.0.1:8740"
@@ -148,31 +165,38 @@ def _enqueue(event: str, run_id: Any, parent_run_id: Any = None,
 
 @contextlib.contextmanager
 def tag_run(correlation_id: str):
-    """Tag every observer event in this scope with `correlation_id`.
+    """OPTIONAL: tag every observer event in this scope with a custom
+    `correlation_id` (e.g. your business-domain id like deliverable_id,
+    rather than LangChain's auto-assigned run UUID).
 
-    Use to link your app-level run id to all the per-callback events
-    LangChain emits inside it (chain_start, llm_start, external_start,
-    etc.). The chimera daemon indexes events by correlation_id so you
-    can later query "all observer activity for app run X" with a single
-    GET /api/heartbeats/{project}/by-correlation/{cid}.
+    **You usually don't need this.** v0.4.1+ auto-derives correlation_id
+    from LangChain's top-level run_id (the one passed to on_chain_start
+    when parent_run_id is None — i.e. when graph.invoke fires). All
+    downstream events including external HTTP get tagged automatically
+    via ContextVar inheritance. Zero app code changes.
+
+    Use tag_run only when you want a domain-specific identifier instead
+    of LangChain's UUID — e.g. you'd rather query by deliverable_id than
+    by an opaque run_id. Explicit values win over auto when both are set.
 
     Example::
 
-        with chimera_observer.tag_run(my_run_id):
+        with chimera_observer.tag_run(deliverable_id):
             result = graph.invoke(state)
+        # → all events for this graph run carry correlation_id=deliverable_id
+        # → query: GET /api/heartbeats/{project}/by-correlation/{deliverable_id}
 
-    ContextVar-based — propagates through async/await and ThreadPoolExecutor
-    boundaries automatically. Same pattern LangChain uses for its tracer
-    context vars; works correctly across asyncio.gather + to_thread.
-
-    Nested tag_run calls are supported (inner overrides outer for the
-    inner scope; outer restored on exit).
+    ContextVar-based — propagates through async/await and to_thread
+    boundaries automatically. Nested tag_runs supported (inner overrides
+    outer for inner scope; outer restored on exit).
     """
     token = _correlation_id.set(correlation_id)
+    auto_token = _correlation_auto.set(False)  # explicit
     try:
         yield correlation_id
     finally:
         _correlation_id.reset(token)
+        _correlation_auto.reset(auto_token)
 
 
 def set_correlation_id(correlation_id: str | None) -> None:
@@ -209,6 +233,16 @@ def _try_get_handler_class():
         # Chain (node) events
         def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, **kwargs):
             try:
+                # Auto-correlation: when this is a top-level chain (no
+                # parent), and no explicit tag_run is in scope, set
+                # correlation_id to this run_id. Every sub-event in this
+                # ContextVar scope (sub-chains, llms, tools, external
+                # HTTP via httpx/requests monkey-patches) inherits it.
+                # No app code changes needed — graph.invoke "just works."
+                if parent_run_id is None and _correlation_id.get() is None:
+                    _correlation_id.set(str(run_id))
+                    _correlation_auto.set(True)
+
                 name = (
                     (kwargs.get("name") if isinstance(kwargs, dict) else None)
                     or (serialized.get("name") if isinstance(serialized, dict) else None)
@@ -225,6 +259,16 @@ def _try_get_handler_class():
         def on_chain_end(self, outputs, *, run_id, parent_run_id=None, **kwargs):
             try:
                 _enqueue("chain_end", run_id, parent_run_id)
+                # Clear auto-set correlation when the top-level chain
+                # ends. Explicit tag_run values are not cleared (they're
+                # managed by the context manager exit instead).
+                if (
+                    parent_run_id is None
+                    and _correlation_auto.get()
+                    and _correlation_id.get() == str(run_id)
+                ):
+                    _correlation_id.set(None)
+                    _correlation_auto.set(False)
             except Exception:
                 pass
 
