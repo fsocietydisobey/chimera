@@ -226,7 +226,7 @@ def _consume_handoffs(session_id: str, cwd: str) -> list[dict]:
 
 def _format_handoffs(handoffs: list[dict], cwd: str) -> str:
     lines = [
-        f"📦 chimera handoffs — {len(handoffs)} note(s) from prior sessions in this project ({cwd}):",
+        f"📦 chimera handoffs — {len(handoffs)} directive(s) from prior session(s) in this project ({cwd}):",
         "",
     ]
     for h in handoffs:
@@ -237,8 +237,22 @@ def _format_handoffs(handoffs: list[dict], cwd: str) -> str:
         lines.append(f"  {text}")
         lines.append("")
     lines.append(
-        "These are forward-looking notes from prior work. Each handoff was "
-        "marked read by this session — they won't re-surface on resume."
+        "**These are not informational — they're work the prior session left "
+        "specifically for whoever picks up here.** Your job this turn:\n"
+        "  1. Read any files / specs the handoff(s) reference.\n"
+        "  2. Propose a concrete first action — pick the highest-priority "
+        "item, summarize it in one sentence, and state which file/line "
+        "you're going to start at.\n"
+        "  3. Then START. Don't wait for the user to say \"yes do that\" — "
+        "the handoff IS the authorization. The user knows what's in scope "
+        "(they posted it) and will redirect if you're heading the wrong "
+        "way.\n"
+        "  4. If the handoff is genuinely ambiguous about which item to "
+        "tackle first, ask ONE clarifying question — don't list options.\n"
+        "\n"
+        "Each handoff was marked read by this session — they won't re-"
+        "surface on resume. If you need them again, query session_state "
+        "of the sender."
     )
     return "\n".join(lines).rstrip()
 

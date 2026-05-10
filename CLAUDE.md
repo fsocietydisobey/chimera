@@ -111,9 +111,21 @@ the closest correct primitive by name. Saves the next layer of
 |---|---|---|
 | Ask a sister session, need answer | `session_log_question(target_session_id=B)` + `session_wait_for_answer` | Targeted; auto-surfaces in B's hook |
 | FYI / ack, no reply expected | `session_post_notice` | Re-surfaces up to 3 turns then auto-expires |
-| Note for the NEXT session in this project | `session_post_handoff(scope_cwd=...)` | Auto-surfaces on any future session's SessionStart hook |
+| **Task for the next session in this project** | `session_post_handoff(scope_project=...)` | **Directive, not informational.** Auto-surfaces on any future session's SessionStart hook. The receiving agent is expected to START on it, not wait for user confirmation. |
 | Read what a stopped session said | `session_query_transcript` / `session_summarize_transcript` | Heuristic — no LLM call from chimera |
 | State a commitment, no audience | `session_log_decision` | Pull-only via `session_state` |
+
+### Handoffs are directives, not FYIs
+
+When you boot and see a `📦 chimera handoffs` block:
+
+1. **Treat it as your task list.** The prior session left it specifically for whoever picks up here. The user posted it; they don't need to re-authorize each step.
+2. **Read the linked files / specs first.** Don't summarize until you've read.
+3. **Propose a concrete first action** — pick the highest-priority item, state in one sentence which file/line you're starting at.
+4. **Then start.** Don't wait for "yes do that" — the handoff IS the authorization. The user redirects if you're heading wrong.
+5. **If genuinely ambiguous**, ask ONE clarifying question. Don't enumerate options.
+
+This is the difference between "agent reads handoff, summarizes, waits for instructions" (wrong — duplicates effort the user already did) and "agent reads handoff, picks an item, starts working, reports progress" (right — what handoffs are for).
 
 **Anti-pattern:** logging questions when no answer is needed. The
 ping-pong pattern (ask, wait, ask follow-up) is usually worse than
