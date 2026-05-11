@@ -117,3 +117,46 @@ def test_post_handoff_fires_notification(isolated_state, tmp_path, monkeypatch):
     args = mock_n.call_args[0]
     assert args[0] == "asker"
     assert args[1] == str(project)
+
+
+def test_notify_invite_includes_owner_and_invitee(linux_platform, enabled):
+    with patch.object(desktop_notify.subprocess, "Popen") as mock_popen:
+        desktop_notify.notify_invite(
+            "owner-xyz", "invitee-abc-12345", "take this slice"
+        )
+    cmd = mock_popen.call_args[0][0]
+    title = cmd[2]
+    body = cmd[3]
+    assert "invitee-abc-" in title  # truncated to 12 chars
+    assert "owner-xy" in body  # truncated to 8 chars
+    assert "take this slice" in body
+
+
+def test_invite_handoff_fires_notify_invite_only(isolated_state, tmp_path, monkeypatch):
+    """Integration: invite_handoff fires notify_invite, NOT notify_notice
+    (post_notice is suppressed because invite path owns the popup)."""
+    monkeypatch.setenv("CHIMERA_DESKTOP_NOTIFY", "1")
+    project = tmp_path / "proj"
+    project.mkdir()
+    parent = isolated_state.post_handoff(
+        "asker",
+        text="parent",
+        scope_cwd=str(project),
+        expires_in_hours=24,
+    )
+    isolated_state.consume_handoffs("owner-A", str(project))
+    isolated_state.log_decision("invitee-B", "init", "")
+
+    with (
+        patch.object(isolated_state.desktop_notify, "notify_invite") as mock_invite,
+        patch.object(isolated_state.desktop_notify, "notify_notice") as mock_notice,
+    ):
+        isolated_state.invite_handoff(
+            parent["id"],
+            owner_session_id="owner-A",
+            invitee_session_id="invitee-B",
+            text="take this",
+        )
+
+    mock_invite.assert_called_once()
+    mock_notice.assert_not_called()

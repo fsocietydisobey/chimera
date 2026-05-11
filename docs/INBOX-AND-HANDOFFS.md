@@ -17,6 +17,7 @@
 | Find what a stopped session said | `session_query_transcript(name, q)` (MCP) | grep on-disk JSONL |
 | Subscribe to a handoff owner's progress | `session_subscribe_handoff(id, me)` | adds you to subscribers |
 | Owner releases work | `session_release_handoff(id, me)` | clears owner; next claim wins |
+| Owner delegates a slice to a specific session | `session_invite_handoff(parent_id, me, invitee, text)` | child handoff scoped to invitee |
 
 If you only learn three: **`/tell`** (send to anyone/anywhere), **`/handoff`** (future session), **`/inbox`** (read).
 
@@ -151,6 +152,13 @@ Subsequent sessions in same cwd consuming:
 Owner finishes or steps aside:
     → session_release_handoff(id, owner_session_id)
     → owner field cleared; next consume claims as new owner
+
+Owner delegates a slice to a specific session:
+    → session_invite_handoff(parent_id, me, invitee, text)
+    → creates a CHILD handoff with parent_id + target_session_id
+    → invitee gets inbox notice immediately (if live)
+    → AND surfaces on invitee's next SessionStart hook with INVITE framing
+    → cwd-peers skip it — invite is 1:1 by construction
 
 Subscribers stay subscribed across owner changes.
 ```

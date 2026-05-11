@@ -180,3 +180,41 @@ def test_archive_search_unknown_session_returns_404(api_client):
     )
     assert r.status_code == 404
     assert "no session" in r.json()["detail"].lower()
+
+
+def test_invite_handoff_happy_path(api_client, isolated_state, tmp_path):
+    """POST /handoffs/{id}/invite → 200 + child handoff record."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    parent = isolated_state.post_handoff(
+        "asker", text="parent", scope_cwd=str(project), expires_in_hours=24,
+    )
+    isolated_state.consume_handoffs("owner-A", str(project))
+    isolated_state.log_decision("invitee-B", "init", "")
+
+    r = api_client.post(
+        f"/api/handoffs/{parent['id']}/invite",
+        json={
+            "owner_session_id": "owner-A",
+            "invitee_session_id": "invitee-B",
+            "text": "please pick up x",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["parent_id"] == parent["id"]
+    assert body["target_session_id"] == "invitee-B"
+
+
+def test_invite_handoff_unknown_parent_returns_404(api_client):
+    """POST /handoffs/{bad-id}/invite → 404."""
+    r = api_client.post(
+        "/api/handoffs/deadbeefdead/invite",
+        json={
+            "owner_session_id": "anyone",
+            "invitee_session_id": "anyone",
+            "text": "should 404",
+        },
+    )
+    assert r.status_code == 404
+    assert "no handoff" in r.json()["detail"].lower()

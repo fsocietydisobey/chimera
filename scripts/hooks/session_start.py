@@ -222,6 +222,12 @@ def _consume_handoffs(session_id: str, cwd: str) -> list[dict]:
         # Match: cwd is the scope OR a child of scope
         if cwd_abs != scope and not cwd_abs.startswith(scope.rstrip("/") + "/"):
             continue
+        # Targeted-invite filter — must mirror daemon's consume_handoffs.
+        # If a handoff has target_session_id, only that session may
+        # consume it; cwd-peers skip silently.
+        target = h.get("target_session_id")
+        if target and target != session_id:
+            continue
         read_by = h.get("read_by") or []
         if session_id in read_by:
             continue
@@ -283,7 +289,22 @@ def _format_handoffs(handoffs: list[dict], cwd: str) -> str:
             from_id = (h.get("from_session_id") or "?")[:8]
             ts = (h.get("ts") or "")[:19]
             text = (h.get("text") or "").strip()
-            lines.append(f"- [handoff {h['id'][:8]} · {ts} · from {from_id}]")
+            # Targeted invites carry parent_id + target_session_id. Surface
+            # the invite framing so the agent knows this was delegated TO
+            # them specifically (not a generic cwd-broadcast).
+            parent = h.get("parent_id")
+            target = h.get("target_session_id")
+            if parent and target:
+                lines.append(
+                    f"- 🤝 [INVITE handoff {h['id'][:8]} · {ts} · "
+                    f"from {from_id} · parent {parent[:8]}]"
+                )
+                lines.append(
+                    f"  You were specifically invited to this slice; "
+                    f"the parent handoff is owned by {from_id}."
+                )
+            else:
+                lines.append(f"- [handoff {h['id'][:8]} · {ts} · from {from_id}]")
             lines.append(f"  {text}")
             lines.append("")
         lines.append(

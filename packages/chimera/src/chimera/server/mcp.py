@@ -1782,6 +1782,43 @@ async def session_release_handoff(handoff_id: str, session_id: str) -> str:
 
 
 @mcp.tool()
+@logged_tool("session_invite_handoff")
+async def session_invite_handoff(
+    parent_handoff_id: str,
+    owner_session_id: str,
+    invitee_session_id: str,
+    text: str,
+    expires_in_hours: float = 168.0,
+) -> str:
+    """**Delegate a slice of a handoff to a specific session.**
+
+    Layer 3 of the collaboration model — once you own a handoff, you can
+    split off subtasks and invite sibling sessions to take them. The
+    invite is a child handoff targeting that session: only the invitee
+    can consume it (cwd-scoped peers skip it), and they get both an
+    inbox notice (immediate, if live) and a SessionStart-hook surface
+    (on next boot).
+
+    Distinct from session_post_handoff (cwd-broadcast, anyone picks up)
+    and session_post_notice (one-shot FYI, no directive framing).
+
+    Args:
+        parent_handoff_id: 12-char id of the handoff you currently own.
+        owner_session_id: your session id — must match parent's owner.
+        invitee_session_id: session you're delegating to (UUID or name).
+        text: invite body — what specifically you want them to do.
+        expires_in_hours: TTL. Default 168 (7 days).
+    """
+    return await _monitor_tools.session_invite_handoff(
+        parent_handoff_id,
+        owner_session_id,
+        invitee_session_id,
+        text,
+        expires_in_hours,
+    )
+
+
+@mcp.tool()
 @logged_tool("session_post_handoff")
 async def session_post_handoff(
     from_session_id: str,

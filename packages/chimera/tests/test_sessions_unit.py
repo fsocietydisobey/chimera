@@ -390,3 +390,117 @@ def test_summary_resolves_friendly_name(isolated_state):
     s = isolated_state.summary("friendly")
     assert s["session_id"] == sid
     assert s["decision_count"] == 1
+
+
+def test_invite_handoff_owner_creates_child(isolated_state, tmp_path):
+    """Owner of a parent handoff invites an invitee → child handoff with
+    parent_id + target_session_id, inheriting parent's scope_cwd."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+
+    parent = isolated_state.post_handoff(
+        asker, text="parent work", scope_cwd=str(project), expires_in_hours=24,
+    )
+    isolated_state.consume_handoffs("owner-A", str(project))  # claims ownership
+
+    # Materialize the invitee so post_notice in invite path doesn't 404
+    isolated_state.log_decision("invitee-B", "init", "")
+
+    child = isolated_state.invite_handoff(
+        parent["id"],
+        owner_session_id="owner-A",
+        invitee_session_id="invitee-B",
+        text="please handle subtask 2",
+    )
+    assert child["parent_id"] == parent["id"]
+    assert child["target_session_id"] == "invitee-B"
+    assert child["scope_cwd"] == str(project)
+    assert child["from_session_id"] == "owner-A"
+    # Invite is a distinct handoff with its own id
+    assert child["id"] != parent["id"]
+
+
+def test_invite_handoff_non_owner_rejected(isolated_state, tmp_path):
+    """Only the current owner can invite. Non-owner → ValueError."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+    parent = isolated_state.post_handoff(
+        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+    )
+    isolated_state.consume_handoffs("owner-A", str(project))
+
+    with pytest.raises(ValueError, match="doesn't own"):
+        isolated_state.invite_handoff(
+            parent["id"],
+            owner_session_id="not-the-owner",
+            invitee_session_id="anyone",
+            text="should fail",
+        )
+
+
+def test_invite_handoff_unknown_parent_raises(isolated_state):
+    """Inviting against a non-existent parent → ValueError."""
+    with pytest.raises(ValueError, match="No handoff"):
+        isolated_state.invite_handoff(
+            "deadbeefdead",
+            owner_session_id="me",
+            invitee_session_id="you",
+            text="nope",
+        )
+
+
+def test_invite_handoff_only_invitee_can_consume(isolated_state, tmp_path):
+    """Targeted invite: only the named invitee may consume; cwd-peers skip."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+    parent = isolated_state.post_handoff(
+        asker, text="parent", scope_cwd=str(project), expires_in_hours=24,
+    )
+    isolated_state.consume_handoffs("owner-A", str(project))
+    isolated_state.log_decision("invitee-B", "init", "")
+    isolated_state.invite_handoff(
+        parent["id"],
+        owner_session_id="owner-A",
+        invitee_session_id="invitee-B",
+        text="for B only",
+    )
+
+    # A peer session in same cwd consumes → sees the parent (already
+    # read_by=[owner-A], so peer sees it fresh) but NOT the invite.
+    peer = isolated_state.consume_handoffs("session-C", str(project))
+    invite_ids = [h.get("target_session_id") for h in peer]
+    assert "invitee-B" not in invite_ids
+    assert all(h.get("target_session_id") in (None, "session-C") for h in peer)
+
+    # The invitee themselves consumes → sees the invite
+    invitee_matched = isolated_state.consume_handoffs("invitee-B", str(project))
+    invitee_targets = [h.get("target_session_id") for h in invitee_matched]
+    assert "invitee-B" in invitee_targets
+
+
+def test_invite_handoff_posts_inbox_notice(isolated_state, tmp_path):
+    """Invite path drops an inbox notice on a live invitee for mid-session
+    surfacing (in addition to the SessionStart-hook path)."""
+    asker = "asker"
+    project = tmp_path / "p"
+    project.mkdir()
+    parent = isolated_state.post_handoff(
+        asker, text="parent", scope_cwd=str(project), expires_in_hours=24,
+    )
+    isolated_state.consume_handoffs("owner-A", str(project))
+    isolated_state.log_decision("invitee-B", "init", "")
+
+    isolated_state.invite_handoff(
+        parent["id"],
+        owner_session_id="owner-A",
+        invitee_session_id="invitee-B",
+        text="please pick up subtask",
+    )
+
+    pending = isolated_state.pending_notes("invitee-B", mark_read=False)
+    invite_notices = [n for n in pending if "INVITE" in (n.get("text") or "")]
+    assert len(invite_notices) == 1
+    assert "please pick up subtask" in invite_notices[0]["text"]

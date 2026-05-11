@@ -1013,6 +1013,128 @@ def release_handoff(handoff_id: str, session_id: str) -> dict:
     return matched
 
 
+def invite_handoff(
+    parent_handoff_id: str,
+    owner_session_id: str,
+    invitee_session_id: str,
+    text: str,
+    *,
+    expires_in_hours: float = 168.0,
+) -> dict:
+    """Owner of a handoff delegates a slice of work to a specific session.
+
+    Creates a CHILD handoff that:
+      - links back to the parent via `parent_id`,
+      - is scoped to a single session via `target_session_id` (only the
+        named session can consume it; cwd-scoped consumers skip it),
+      - inherits the parent's `scope_cwd` so the SessionStart hook still
+        considers it in-scope when the invitee boots in the same project,
+      - posts an inbox notice immediately so a currently-live invitee
+        sees the invite mid-session without waiting for next boot.
+
+    Use case: you've claimed handoff A but it has 3 distinct subtasks.
+    You take subtask 1; invite sibling session X to subtask 2.
+    X gets a real directive, not a vague "FYI", and the SessionStart
+    hook framing applies (handoff = directive, not chat).
+
+    Args:
+        parent_handoff_id: 12-char id of the parent handoff. The caller
+            must currently own this handoff.
+        owner_session_id: caller's session id (must equal parent's
+            owner_session_id).
+        invitee_session_id: target session — UUID or friendly name. Resolved
+            at invite time, so later renames don't redirect the invite.
+        text: invite body — what specifically you want the invitee to do.
+        expires_in_hours: invite TTL. Default 7 days. Shorter for urgent
+            asks, longer for "whenever you get to it" delegations.
+
+    Raises:
+        ValueError: parent handoff doesn't exist; caller doesn't own it;
+            invitee can't be resolved (and isn't a plausible literal id).
+    """
+    if not _HANDOFFS_PATH.exists():
+        raise ValueError(f"No handoff with id {parent_handoff_id!r}")
+
+    # Owner must resolve cleanly; lenient otherwise (matches release_handoff).
+    try:
+        owner_session_id = resolve_session_id(owner_session_id)
+    except ValueError:
+        pass
+
+    # Invitee resolves at invite time — name→uuid snapshotted now, so a
+    # later rename doesn't silently redirect the invite to someone else.
+    # Lenient fallback: if the name doesn't resolve (sister session hasn't
+    # logged anything yet), keep the literal so the invite still works
+    # once they materialize.
+    try:
+        invitee_resolved = resolve_session_id(invitee_session_id)
+    except ValueError:
+        invitee_resolved = invitee_session_id
+
+    parent: dict | None = None
+    for h in _read_jsonl(_HANDOFFS_PATH):
+        if h.get("id") == parent_handoff_id:
+            parent = h
+            break
+    if parent is None:
+        raise ValueError(
+            f"No handoff with id {parent_handoff_id!r}. Use list_handoffs "
+            f"to see available handoffs in your cwd."
+        )
+    if parent.get("owner_session_id") != owner_session_id:
+        raise ValueError(
+            f"Session {owner_session_id!r} doesn't own handoff "
+            f"{parent_handoff_id!r}; owner is "
+            f"{parent.get('owner_session_id') or 'unset'}. Only the "
+            f"current owner can invite."
+        )
+
+    expires_at = time.time() + expires_in_hours * 3600.0
+    child = {
+        "id": uuid.uuid4().hex[:12],
+        "ts": _now_iso(),
+        "from_session_id": owner_session_id,
+        "parent_id": parent_handoff_id,
+        "target_session_id": invitee_resolved,
+        "text": text,
+        "scope_cwd": parent.get("scope_cwd"),
+        "expires_at": expires_at,
+        "read_by": [],
+    }
+    _HANDOFFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _append_jsonl(_HANDOFFS_PATH, child)
+
+    # Best-effort: surface to currently-live invitee via inbox. If the
+    # invitee session dir doesn't exist yet, skip — the SessionStart hook
+    # will pick the handoff up when they boot.
+    try:
+        notice_text = (
+            f"🤝 INVITE from {owner_session_id[:8]} (handoff {child['id']}, "
+            f"parent {parent_handoff_id}): {text}"
+        )
+        post_notice(
+            invitee_resolved,
+            notice_text,
+            from_session_id=owner_session_id,
+            fire_desktop_notify=False,  # invite path fires notify_invite below
+        )
+    except ValueError:
+        # Invitee not materialized yet — handoff alone will surface on
+        # their next boot.
+        pass
+
+    desktop_notify.notify_invite(owner_session_id, invitee_resolved, text)
+    log.info(
+        "handoff %s inviting %s by %s (parent=%s) — %s",
+        child["id"],
+        invitee_resolved,
+        owner_session_id,
+        parent_handoff_id,
+        text[:80],
+    )
+    return child
+
+
 def _broadcast_to_handoff_subscribers(
     owner_session_id: str,
     kind: str,
@@ -1118,6 +1240,10 @@ def consume_handoffs(session_id: str, cwd: str) -> list[dict]:
     (so a handoff scoped at /repo/root surfaces in any session working
     in /repo/root/sub/path/...).
 
+    Targeted handoffs (those with `target_session_id`, posted via
+    `invite_handoff`) additionally require session_id == target. Other
+    sessions in the same cwd MUST NOT consume someone else's invite.
+
     Excluded: handoffs already in this session's read_by, or expired.
     """
     if not _HANDOFFS_PATH.exists():
@@ -1139,6 +1265,11 @@ def consume_handoffs(session_id: str, cwd: str) -> list[dict]:
         # Match: cwd is the scope, or starts with scope + os.sep
         if cwd_abs != scope and not cwd_abs.startswith(scope.rstrip("/") + "/"):
             continue
+        # Targeted-invite filter: if a handoff names a specific invitee,
+        # only that session may consume it; cwd-peers skip silently.
+        target = h.get("target_session_id")
+        if target and target != session_id:
+            continue
         read_by = h.get("read_by") or []
         if session_id in read_by:
             continue
@@ -1147,6 +1278,8 @@ def consume_handoffs(session_id: str, cwd: str) -> list[dict]:
         # sessions get the handoff with owner info attached so they can
         # decide to subscribe (collaborate) or stand down. The session
         # sees this distinction in its SessionStart hook output.
+        # Invites bypass the contested-ownership branch — they're already
+        # 1:1 by construction.
         existing_owner = h.get("owner_session_id")
         if not existing_owner:
             h["owner_session_id"] = session_id

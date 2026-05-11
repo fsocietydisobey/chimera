@@ -72,6 +72,13 @@ class HandoffReq(BaseModel):
     expires_in_hours: float = 168.0
 
 
+class InviteHandoffReq(BaseModel):
+    owner_session_id: str
+    invitee_session_id: str
+    text: str
+    expires_in_hours: float = 168.0
+
+
 class RouteMessageReq(BaseModel):
     target: str
     text: str
@@ -302,6 +309,24 @@ def build_router():
         """Owner releases the handoff; next consumer becomes owner."""
         try:
             return sessions.release_handoff(handoff_id, req["session_id"])
+        except ValueError as e:
+            raise fastapi.HTTPException(404, str(e))
+
+    @router.post("/handoffs/{handoff_id}/invite")
+    async def invite_handoff(handoff_id: str, req: InviteHandoffReq) -> dict:
+        """Owner invites a specific session to take on a slice of work.
+
+        Creates a child handoff targeting `invitee_session_id`. The
+        caller must currently own `handoff_id`.
+        """
+        try:
+            return sessions.invite_handoff(
+                handoff_id,
+                req.owner_session_id,
+                req.invitee_session_id,
+                req.text,
+                expires_in_hours=req.expires_in_hours,
+            )
         except ValueError as e:
             raise fastapi.HTTPException(404, str(e))
 

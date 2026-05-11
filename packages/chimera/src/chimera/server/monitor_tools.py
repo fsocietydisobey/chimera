@@ -948,6 +948,38 @@ async def session_release_handoff(handoff_id: str, session_id: str) -> str:
     return f"✋ released ownership of handoff {handoff_id[:8]}; next session to consume becomes owner"
 
 
+async def session_invite_handoff(
+    parent_handoff_id: str,
+    owner_session_id: str,
+    invitee_session_id: str,
+    text: str,
+    expires_in_hours: float = 168.0,
+) -> str:
+    """Owner delegates a slice of a handoff to a specific other session.
+
+    Creates a child handoff targeting `invitee_session_id`. Invitee gets
+    an inbox notice immediately (if currently live) AND the handoff
+    surfaces on their next SessionStart hook.
+    """
+    body: dict[str, Any] = {
+        "owner_session_id": owner_session_id,
+        "invitee_session_id": invitee_session_id,
+        "text": text,
+        "expires_in_hours": expires_in_hours,
+    }
+    data = _post(
+        f"/api/handoffs/{urllib.parse.quote(parent_handoff_id)}/invite",
+        body,
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return (
+        f"🤝 invited {invitee_session_id} to handoff {data.get('id')} "
+        f"(parent={parent_handoff_id}, expires_in_hours={expires_in_hours})"
+    )
+
+
 async def session_post_handoff(
     from_session_id: str,
     text: str,
