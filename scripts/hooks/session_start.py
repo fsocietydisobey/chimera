@@ -225,6 +225,22 @@ def _consume_handoffs(session_id: str, cwd: str) -> list[dict]:
         read_by = h.get("read_by") or []
         if session_id in read_by:
             continue
+
+        # Auto-claim: first session to consume an unclaimed handoff
+        # becomes owner. Mirrors daemon's consume_handoffs logic so the
+        # render path (which keys off _claim_role) sees this handoff
+        # as "owned by me" and renders the OWN directive framing.
+        # Without this, the hook's local consume left _claim_role unset
+        # and _format_handoffs would drop the handoff silently (matching
+        # neither "owner" nor "observer" filter).
+        existing_owner = h.get("owner_session_id")
+        if not existing_owner:
+            h["owner_session_id"] = session_id
+            h["_claim_role"] = "owner"
+        else:
+            h["_claim_role"] = "observer"
+            h["_owner_session_id"] = existing_owner
+
         matched.append(h)
         h["read_by"] = read_by + [session_id]
         modified = True
@@ -248,7 +264,10 @@ def _format_handoffs(handoffs: list[dict], cwd: str) -> str:
     # Split by role assigned during consume: this session may have
     # auto-claimed ownership of fresh handoffs OR be an observer on
     # handoffs already claimed by another session.
-    owned = [h for h in handoffs if h.get("_claim_role") == "owner"]
+    # Defensive: any handoff without _claim_role defaults to "owner"
+    # framing (it'd be silently dropped otherwise — the bug from
+    # 2026-05-11 where pre-claim-logic handoffs surfaced as empty).
+    owned = [h for h in handoffs if h.get("_claim_role", "owner") == "owner"]
     observed = [h for h in handoffs if h.get("_claim_role") == "observer"]
 
     lines: list[str] = []
