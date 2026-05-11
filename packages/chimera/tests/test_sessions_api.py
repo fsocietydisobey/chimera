@@ -43,6 +43,26 @@ def test_get_state_known_session_returns_state(api_client, isolated_state):
     assert body["recent_decisions"][0]["text"] == "test decision"
 
 
+def test_get_summary_known_session(api_client, isolated_state):
+    """Happy path: summary returns counts + status, no record bodies."""
+    isolated_state.log_decision("summary-session", "d1", "")
+    isolated_state.set_status("summary-session", "implementing", "doing")
+    r = api_client.get("/api/sessions/summary-session/summary")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["session_id"] == "summary-session"
+    assert body["decision_count"] == 1
+    assert body["status"]["status"] == "implementing"
+    assert "recent_decisions" not in body
+
+
+def test_get_summary_unknown_session_returns_404(api_client):
+    """Regression guard: unknown session → 404, not 500."""
+    r = api_client.get("/api/sessions/no-such-session/summary")
+    assert r.status_code == 404
+    assert "no session" in r.json()["detail"].lower()
+
+
 def test_post_notice_to_known_session_returns_200(api_client, isolated_state):
     """Happy path counterpart to the 404 regression test."""
     # Materialize the target session

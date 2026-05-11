@@ -1170,6 +1170,38 @@ async def session_state(session_id: str, recent: int = 10) -> str:
     return "\n".join(parts)
 
 
+async def session_summary(session_id: str) -> str:
+    """Lightweight session digest — status + counts + last-active, no bodies.
+
+    Use to poll "is session X done yet?" or render an overview. Cheaper
+    than session_state() because it does NOT load decision/file bodies.
+    """
+    data = _get(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/summary",
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+
+    parts = [f"**session `{session_id}`** (summary)"]
+    status = data.get("status")
+    if status:
+        parts.append(
+            f"status: **{status.get('status', '?')}**"
+            + (f" — {status['detail']}" if status.get("detail") else "")
+            + f" (updated {status.get('updated_at', '?')})"
+        )
+    age = data.get("last_active_age_s")
+    age_str = f"{age:.0f}s ago" if isinstance(age, (int, float)) else "?"
+    parts.append(
+        f"decisions: {data.get('decision_count', 0)} · "
+        f"files: {data.get('file_touch_count', 0)} · "
+        f"open Qs: {data.get('open_question_count', 0)} · "
+        f"last active {age_str}"
+    )
+    return "\n".join(parts)
+
+
 async def session_pending_notes(session_id: str, mark_read: bool = True) -> str:
     """**A's inbox read.** Fetch unread answers other sessions have posted
     to this session's questions.

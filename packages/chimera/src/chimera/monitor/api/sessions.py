@@ -100,6 +100,13 @@ def build_router():
             # rather than a 500 stack trace.
             raise fastapi.HTTPException(404, str(e))
 
+    @router.get("/sessions/{session_id}/summary")
+    async def get_summary(session_id: str) -> dict:
+        try:
+            return sessions.summary(session_id)
+        except ValueError as e:
+            raise fastapi.HTTPException(404, str(e))
+
     @router.get("/sessions/{session_id}/pending")
     async def get_pending(session_id: str, mark_read: bool = True) -> dict:
         try:

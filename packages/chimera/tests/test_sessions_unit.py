@@ -349,3 +349,44 @@ def test_consume_handoffs_expired_dropped(isolated_state, tmp_path, monkeypatch)
     if isolated_state._HANDOFFS_PATH.exists():
         contents = isolated_state._HANDOFFS_PATH.read_text()
         assert "stale" not in contents
+
+
+def test_summary_returns_counts_not_bodies(isolated_state):
+    """summary() returns aggregate counts + status, no record bodies."""
+    sid = "summary-test"
+    isolated_state.log_decision(sid, "d1", "")
+    isolated_state.log_decision(sid, "d2", "")
+    isolated_state.log_touch(sid, "/x/y.py", "edit")
+    isolated_state.log_question(sid, "q?")
+    isolated_state.set_status(sid, "implementing", "doing the thing")
+
+    s = isolated_state.summary(sid)
+
+    assert s["session_id"] == sid
+    assert s["decision_count"] == 2
+    assert s["file_touch_count"] == 1
+    assert s["open_question_count"] == 1
+    assert s["status"]["status"] == "implementing"
+    assert s["last_active"] > 0
+    assert s["last_active_age_s"] >= 0
+    # Lightweight contract — no record bodies leaked
+    assert "recent_decisions" not in s
+    assert "recent_files" not in s
+    assert "open_questions" not in s
+
+
+def test_summary_unknown_session_raises(isolated_state):
+    """Regression: unknown name/id → ValueError (API layer wraps to 404)."""
+    with pytest.raises(ValueError, match="No session named or id'd"):
+        isolated_state.summary("no-such-session")
+
+
+def test_summary_resolves_friendly_name(isolated_state):
+    """summary() accepts a name set via set_name, just like state()."""
+    sid = "uuid-style-id-abc"
+    isolated_state.log_decision(sid, "init", "")
+    isolated_state.set_name(sid, "friendly")
+
+    s = isolated_state.summary("friendly")
+    assert s["session_id"] == sid
+    assert s["decision_count"] == 1

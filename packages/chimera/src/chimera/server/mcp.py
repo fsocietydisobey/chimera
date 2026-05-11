@@ -1999,6 +1999,22 @@ async def session_state(session_id: str, recent: int = 10) -> str:
 
 
 @mcp.tool()
+@logged_tool("session_summary")
+async def session_summary(session_id: str) -> str:
+    """Lightweight session digest — status + counts + last-active, no bodies.
+
+    Use this instead of session_state when you only need to know "what's
+    session X doing right now?" or "is it done yet?" — does NOT load
+    decision/file/question bodies, so it's cheaper for long-running
+    sessions with hundreds of records.
+
+    Args:
+        session_id: the session to inspect (UUID or friendly name).
+    """
+    return await _monitor_tools.session_summary(session_id)
+
+
+@mcp.tool()
 @logged_tool("session_pending_notes")
 async def session_pending_notes(session_id: str, mark_read: bool = True) -> str:
     """**Inbox read.** Get unread answers other sessions have posted to your

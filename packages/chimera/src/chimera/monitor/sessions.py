@@ -376,6 +376,46 @@ def state(session_id: str, recent: int = 10) -> dict:
     }
 
 
+def summary(session_id: str) -> dict:
+    """Lightweight digest — counts + status + last_active. No record bodies.
+
+    Use when polling "is X done yet?" or rendering a sessions overview.
+    Substantially cheaper than `state()` for sessions with long history
+    because it counts lines instead of JSON-parsing every record.
+    """
+    session_id = resolve_session_id(session_id)
+    sd = _session_dir(session_id)
+
+    last_mtime = max(
+        (p.stat().st_mtime for p in sd.iterdir() if p.is_file()),
+        default=0.0,
+    )
+    decisions_path = sd / "decisions.jsonl"
+    files_path = sd / "files_touched.jsonl"
+    decision_count = (
+        sum(1 for ln in decisions_path.open() if ln.strip())
+        if decisions_path.exists()
+        else 0
+    )
+    file_touch_count = (
+        sum(1 for ln in files_path.open() if ln.strip()) if files_path.exists() else 0
+    )
+    questions = _read_jsonl(sd / "questions.jsonl")
+    open_question_count = sum(1 for q in questions if q.get("status") == "open")
+    status_path = sd / "status.json"
+    status = json.loads(status_path.read_text()) if status_path.exists() else None
+
+    return {
+        "session_id": session_id,
+        "status": status,
+        "decision_count": decision_count,
+        "file_touch_count": file_touch_count,
+        "open_question_count": open_question_count,
+        "last_active": last_mtime,
+        "last_active_age_s": time.time() - last_mtime if last_mtime else None,
+    }
+
+
 def recent_decisions(across_sessions: bool = True, recent_per_session: int = 5) -> list[dict]:
     """Recent decisions across all sessions (or just the active ones)."""
     if not _BASE_DIR.exists():
