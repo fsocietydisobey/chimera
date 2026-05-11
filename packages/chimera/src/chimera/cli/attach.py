@@ -5,12 +5,21 @@ its LangGraph runs auto-emit heartbeats to chimera-monitor — without
 modifying any committed source in the project. The injected files live
 in the venv (which is gitignored everywhere), so production builds (which
 recreate the venv from a manifest) don't see them.
+
+First-attach onboarding: on the user's first `chimera attach`, prompt
+about installing a systemd user unit for daemon auto-restart. Persists
+a `supervisor_prompted` flag so we only ask once. Skipped in non-TTY
+environments (CI / scripts) and suppressible via CHIMERA_QUIET_SETUP=1.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 from chimera.attach import (
@@ -23,6 +32,12 @@ from chimera.attach import (
     record_detach,
 )
 from chimera.attach.inject import VenvNotFound
+
+
+_STATE_DIR = Path(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+) / "chimera"
+_SETUP_STATE_PATH = _STATE_DIR / "setup-state.json"
 
 
 def add_subparser(subparsers: argparse._SubParsersAction) -> None:
@@ -110,7 +125,143 @@ def run_attach(args: argparse.Namespace) -> int:
         "\nThe app's LangGraph runs will now emit heartbeats to chimera-monitor "
         "on its next start. Restart the app to pick up the observer."
     )
+
+    # First-attach onboarding — prompt about installing the systemd unit
+    # so the daemon auto-restarts on crash + boot. Only fires once
+    # (persisted via setup-state.json) and only in interactive TTY
+    # environments (so CI / scripts don't get prompted).
+    _maybe_prompt_supervisor_install()
+
     return 0
+
+
+def _read_setup_state() -> dict:
+    try:
+        return json.loads(_SETUP_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_setup_state(state: dict) -> None:
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _SETUP_STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.replace(_SETUP_STATE_PATH)
+    except OSError:
+        pass  # best-effort; failing here doesn't break the attach
+
+
+def _systemd_unit_is_active() -> bool:
+    """True if chimera-monitor.service is active (user scope, Linux only)."""
+    if sys.platform != "linux" or not shutil.which("systemctl"):
+        return False
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", "chimera-monitor"],
+            capture_output=True, text=True, timeout=2.0,
+        )
+        return result.stdout.strip() == "active"
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
+def _maybe_prompt_supervisor_install() -> None:
+    """Prompt about installing systemd unit on first attach.
+
+    Skipped if:
+      • CHIMERA_QUIET_SETUP=1 (CI / scripting opt-out)
+      • Not a TTY (stdout/stdin not interactive — pipes, redirects)
+      • Already prompted (setup-state.json has supervisor_prompted=true)
+      • Supervisor already active (no need to ask)
+      • Non-Linux (no systemd unit; macOS gets a one-line tip instead)
+    """
+    if os.environ.get("CHIMERA_QUIET_SETUP"):
+        return
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return
+
+    state = _read_setup_state()
+    if state.get("supervisor_prompted"):
+        return
+
+    # Already supervised? Record the flag and move on without prompting.
+    if _systemd_unit_is_active():
+        state["supervisor_prompted"] = True
+        state["supervisor_status_at_first_attach"] = "already_active"
+        _write_setup_state(state)
+        return
+
+    if sys.platform != "linux":
+        # macOS / Windows — print a one-line tip; no prompt because we
+        # don't ship a launchd template yet (TODO).
+        print(
+            "\n💡 first-attach tip: chimera-monitor has no auto-restart "
+            "supervisor on this platform yet. For long-running use, run "
+            "`chimera monitor watch` in a tmux/screen pane."
+        )
+        state["supervisor_prompted"] = True
+        state["supervisor_status_at_first_attach"] = "non_linux"
+        _write_setup_state(state)
+        return
+
+    if not shutil.which("systemctl"):
+        # Linux but no systemd (alpine, busybox)
+        print(
+            "\n💡 first-attach tip: chimera-monitor has no auto-restart "
+            "supervisor active. systemctl not found; use "
+            "`chimera monitor watch` for a cross-platform fallback."
+        )
+        state["supervisor_prompted"] = True
+        state["supervisor_status_at_first_attach"] = "no_systemctl"
+        _write_setup_state(state)
+        return
+
+    # Interactive Linux + systemd available — actually prompt.
+    print(
+        "\n💡 First-attach setup question:\n"
+        "   The chimera-monitor daemon should stay running across crashes\n"
+        "   and reboots so observability stays live. Install a systemd user\n"
+        "   service for auto-restart? (Recommended.)"
+    )
+    try:
+        answer = input("   Install? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        # User aborted — don't mark as prompted; they may want it next time
+        print()  # cosmetic newline after ^C
+        return
+
+    state["supervisor_prompted"] = True
+
+    if answer in ("", "y", "yes"):
+        # Run `chimera monitor install-service --enable`
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "chimera.cli", "monitor",
+                 "install-service", "--enable"],
+                check=True,
+            )
+            state["supervisor_status_at_first_attach"] = "installed"
+            print(
+                "   ✅ systemd unit installed + enabled. "
+                "Logs: `journalctl --user -u chimera-monitor -f`"
+            )
+        except subprocess.CalledProcessError as e:
+            state["supervisor_status_at_first_attach"] = "install_failed"
+            print(
+                f"   ⚠️  install-service failed ({e}). "
+                f"You can retry manually: "
+                f"`chimera monitor install-service --enable`"
+            )
+    else:
+        state["supervisor_status_at_first_attach"] = "declined"
+        print(
+            "   Skipped. You can install later with:\n"
+            "     `chimera monitor install-service --enable` (systemd)\n"
+            "     `chimera monitor watch` (cross-platform foreground)"
+        )
+
+    _write_setup_state(state)
 
 
 def run_detach(args: argparse.Namespace) -> int:
