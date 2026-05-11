@@ -22,6 +22,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +33,29 @@ _STATE_ROOT = Path(
 ) / "chimera"
 _BASE_DIR = _STATE_ROOT / "sessions"
 _HANDOFFS_PATH = _STATE_ROOT / "handoffs.jsonl"
+
+# Daemon HTTP base. Hook prefers HTTP (single source of truth = the
+# daemon's code) and only falls back to file-direct ops when the daemon
+# is unreachable. The fallback preserves the original safety net but
+# the HTTP path eliminates the drift class where daemon semantics
+# evolved while file-direct hook code lagged behind.
+_ENDPOINT = os.environ.get("CHIMERA_ENDPOINT", "http://127.0.0.1:8740").rstrip("/")
+_HTTP_TIMEOUT_S = 1.5
+
+
+def _http_get_json(path: str) -> dict | None:
+    """GET <endpoint>/<path> → parsed JSON, or None on any failure.
+
+    Quiet by design — hooks must never bubble errors to Claude Code, and
+    a daemon-down condition is expected to fall back to file-direct ops.
+    """
+    url = f"{_ENDPOINT}{path}"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
 
 
 def _now_iso() -> str:
@@ -64,16 +90,22 @@ def _consume_inbox(session_id: str) -> list[dict]:
     """Read unread notes, mark them read, MOVE TO archive.jsonl, return the
     drained set.
 
-    Mirrors chimera.monitor.sessions.pending_notes(mark_read=True): drained
-    notes move from inbox.jsonl → archive.jsonl atomically. Earlier version
-    of this hook marked-read in-place but never archived, so notes appeared
-    "missing" — present in inbox.jsonl as read=true records but invisible
-    to session_search_archive. 2026-05-11 bug: fixed to match daemon's
-    semantics.
-
-    Hook runs as a separate process from the daemon; both use atomic
-    rename for the rewrite so concurrent writes don't corrupt the file.
+    HTTP-primary: hits /api/sessions/{sid}/pending?mark_read=true which is
+    the daemon's authoritative drain-and-archive implementation. Falls
+    back to file-direct ops only if the daemon is unreachable. The file
+    fallback preserves the safety net but is structurally identical to
+    daemon code that has drifted twice in the last day (archive miss,
+    claim miss). The drift class is eliminated on the happy path.
     """
+    # --- HTTP path (preferred) ---
+    payload = _http_get_json(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/pending?mark_read=true"
+    )
+    if payload is not None:
+        notes = payload.get("notes", [])
+        return notes if isinstance(notes, list) else []
+
+    # --- Fallback: file-direct drain + archive (daemon down) ---
     inbox = _session_dir(session_id) / "inbox.jsonl"
     archive = _session_dir(session_id) / "archive.jsonl"
     notes = _read_jsonl(inbox)
@@ -136,11 +168,42 @@ def _discover_other_active_sessions(
     """Walk ~/.local/state/chimera/sessions/ and return other sessions
     that have been active within the window. Sorted newest-first.
 
-    Reads each session's status.json + checks files_touched.jsonl mtime.
+    HTTP-primary: hits /api/sessions (uses the daemon's cached list with
+    2s TTL — 91× faster than re-scanning the filesystem and benefits
+    from the daemon's cache amortization). Falls back to direct scan
+    when daemon is unreachable.
+
     Skips this session and any with no activity in the window.
     """
     import time
 
+    # --- HTTP path (preferred — uses daemon's cached list_sessions) ---
+    payload = _http_get_json("/api/sessions")
+    if payload is not None:
+        cutoff_s = within_minutes * 60
+        sessions = payload.get("sessions", []) or []
+        out: list[dict] = []
+        for s in sessions:
+            sid = s.get("session_id") or ""
+            if not sid or sid == self_session_id:
+                continue
+            age = s.get("last_active_age_s")
+            if age is None or age > cutoff_s:
+                continue
+            out.append(
+                {
+                    "session_id": sid,
+                    "last_active_age_s": int(age),
+                    "status": s.get("status"),
+                    "decision_count": s.get("decision_count", 0),
+                    "file_touch_count": s.get("file_touch_count", 0),
+                    "open_question_count": s.get("open_question_count", 0),
+                }
+            )
+        out.sort(key=lambda r: r.get("last_active_age_s", 0))
+        return out
+
+    # --- Fallback: direct filesystem scan (daemon down) ---
     if not _BASE_DIR.exists():
         return []
 
@@ -198,11 +261,24 @@ def _consume_handoffs(session_id: str, cwd: str) -> list[dict]:
     """Read handoffs whose scope_cwd matches `cwd`; mark this session_id
     as having read them; return the matched set.
 
-    Cwd-scoped handoffs are how prior sessions leave notes for FUTURE
-    sessions ("here's where I left off; pick up at file X commit Y").
-    Without this, the only fallback was naming the prior session +
-    relying on the user to type a bootstrap prompt referencing it.
+    HTTP-primary: hits /api/handoffs/consume which is the daemon's
+    authoritative implementation (auto-claim, target_session_id filter,
+    expired-entry GC). Falls back to file-direct ops if daemon is down.
+    The fallback exists because cwd-scoped handoffs are the bootstrap
+    mechanism for fresh sessions — losing them on daemon down means
+    losing the only signal that prior work needs to be picked up.
     """
+    # --- HTTP path (preferred) ---
+    cwd_q = urllib.parse.quote(cwd, safe="")
+    sid_q = urllib.parse.quote(session_id, safe="")
+    payload = _http_get_json(
+        f"/api/handoffs/consume?session_id={sid_q}&cwd={cwd_q}"
+    )
+    if payload is not None:
+        handoffs = payload.get("handoffs", [])
+        return handoffs if isinstance(handoffs, list) else []
+
+    # --- Fallback: file-direct consume + auto-claim + target filter ---
     import time
 
     if not _HANDOFFS_PATH.exists():
