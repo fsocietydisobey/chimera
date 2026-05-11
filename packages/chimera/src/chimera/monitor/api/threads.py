@@ -28,14 +28,24 @@ from starlette.requests import Request
 
 from .._optional import require
 from ..discovery import ast_walker
-from ..discovery.connections import Connections, PostgresConnection, SqliteConnection, discover_sqlite
+from ..discovery.connections import (
+    Connections,
+    PostgresConnection,
+    SqliteConnection,
+    discover_sqlite,
+)
 from ..discovery.project import Project
 from ..discovery.redaction import redact
 from ..discovery.state_decoder import decode, to_jsonable
 from ..discovery.thread_grouping import parse_grouping
 from ..metadata import cache as meta_cache
 from ..metadata import observations as obs_cache
-from ..metadata.schema import ProjectMetadata, RunClustering, RuntimeObservations, ThreadGrouping
+from ..metadata.schema import (
+    ProjectMetadata,
+    RunClustering,
+    RuntimeObservations,
+    ThreadGrouping,
+)
 
 # ---------------------------------------------------------------------------
 # Postgres SQL
@@ -107,7 +117,10 @@ LIMIT ?
 """
 
 
-def build_router(connections_by_project: dict[Path, Connections], projects: list[Project] | None = None):
+def build_router(
+    connections_by_project: dict[Path, Connections],
+    projects: list[Project] | None = None,
+):
     fastapi = require("fastapi")
     router = fastapi.APIRouter()
 
@@ -240,7 +253,9 @@ def build_router(connections_by_project: dict[Path, Connections], projects: list
         return result
 
     @router.get("/threads/{name}")
-    async def list_threads(name: str, limit: int = 50, offset: int = 0, since: str | None = None):
+    async def list_threads(
+        name: str, limit: int = 50, offset: int = 0, since: str | None = None
+    ):
         conns = _live_connections(name)
         if conns is None or (not conns.postgres and not conns.sqlite):
             raise fastapi.HTTPException(
@@ -270,7 +285,10 @@ def build_router(connections_by_project: dict[Path, Connections], projects: list
             # show "stale" at a fixed 5min when the backend legitimately
             # classifies them running for longer.
             "running_threshold_seconds": running_threshold,
-            "threads": [_serialize_thread(r, grouping, terminals, running_threshold, per_node) for r in rows],
+            "threads": [
+                _serialize_thread(r, grouping, terminals, running_threshold, per_node)
+                for r in rows
+            ],
         }
 
     @router.get("/threads/{name}/{thread_id}")
@@ -284,13 +302,129 @@ def build_router(connections_by_project: dict[Path, Connections], projects: list
 
         rows = await _thread_detail(conns, thread_id, limit)
         if not rows:
-            raise fastapi.HTTPException(status_code=404, detail=f"thread not found: {thread_id}")
+            raise fastapi.HTTPException(
+                status_code=404, detail=f"thread not found: {thread_id}"
+            )
 
         return {
             "project": name,
             "thread_id": thread_id,
             "checkpoints": [_serialize_checkpoint(r) for r in rows],
         }
+
+    @router.get("/threads/{name}/{thread_id}/wait")
+    async def wait_thread(
+        name: str,
+        thread_id: str,
+        until_status: str | None = None,
+        until_node: str | None = None,
+        timeout_s: float = 300.0,
+        poll_interval_s: float = 0.5,
+    ):
+        """**Long-poll** — block server-side until a thread reaches a target
+        state, then return ONE response.
+
+        Replaces the agent-side `sleep(N) → list_threads → check status`
+        polling loop with a single MCP-friendly call. The daemon does the
+        polling (every poll_interval_s, default 500ms) and returns when:
+
+          - status transitions to `until_status` (default behavior: any
+            non-running, non-starting status — i.e. terminal),
+          - `until_node` matches `current_node` (e.g. wait until the run
+            reaches a specific node in the graph),
+          - `timeout_s` exceeded,
+          - the thread is not found (returns reason=not_found).
+
+        Args:
+          until_status: target status. None = wait until not-in-flight
+            (terminal: idle / paused). Common values: "idle", "paused",
+            "running".
+          until_node: optional. Returns when current_node matches this.
+          timeout_s: max wall time before returning reason=timeout.
+          poll_interval_s: daemon-side poll cadence. Default 500ms.
+        """
+        conns = _live_connections(name)
+        if conns is None or (not conns.postgres and not conns.sqlite):
+            raise fastapi.HTTPException(
+                status_code=404,
+                detail=f"no checkpointer connection discovered for project: {name}",
+            )
+
+        grouping = _grouping_for(name)
+        terminals = _terminal_nodes_for(name)
+        running_threshold = _running_threshold_for(name)
+        per_node = _per_node_thresholds_for(name)
+
+        # Default: wait until run leaves the in-flight set. Caller can
+        # override with until_status="paused" to wait for HITL gates etc.
+        in_flight = frozenset({"running", "starting"})
+        # Clamp poll cadence to a sane range to prevent abuse / hot loops.
+        poll_interval_s = max(0.1, min(5.0, poll_interval_s))
+
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        start = asyncio.get_event_loop().time()
+        last_summary: dict[str, Any] | None = None
+
+        while True:
+            # Reuse the list-path code to derive status; limit large enough
+            # to find the target in typical projects. If you have >500
+            # threads per project, raise this.
+            rows = await _list_threads(conns, None, 500, 0)
+            target_row = next(
+                (r for r in rows if r.get("thread_id") == thread_id), None
+            )
+            if target_row is None:
+                return {
+                    "thread_id": thread_id,
+                    "project": name,
+                    "reason": "not_found",
+                    "elapsed_s": asyncio.get_event_loop().time() - start,
+                    "summary": None,
+                }
+
+            summary = _serialize_thread(
+                target_row, grouping, terminals, running_threshold, per_node
+            )
+            last_summary = summary
+            status = summary["status"]
+            current_node = summary["current_node"]
+
+            if until_status is not None and status == until_status:
+                return {
+                    "thread_id": thread_id,
+                    "project": name,
+                    "reason": "until_status_match",
+                    "elapsed_s": asyncio.get_event_loop().time() - start,
+                    "summary": summary,
+                }
+            if until_node is not None and current_node == until_node:
+                return {
+                    "thread_id": thread_id,
+                    "project": name,
+                    "reason": "until_node_match",
+                    "elapsed_s": asyncio.get_event_loop().time() - start,
+                    "summary": summary,
+                }
+            if until_status is None and status not in in_flight:
+                # Default terminal-detection branch.
+                return {
+                    "thread_id": thread_id,
+                    "project": name,
+                    "reason": "terminal",
+                    "elapsed_s": asyncio.get_event_loop().time() - start,
+                    "summary": summary,
+                }
+
+            if asyncio.get_event_loop().time() >= deadline:
+                return {
+                    "thread_id": thread_id,
+                    "project": name,
+                    "reason": "timeout",
+                    "elapsed_s": asyncio.get_event_loop().time() - start,
+                    "summary": last_summary,
+                }
+
+            await asyncio.sleep(poll_interval_s)
 
     @router.get("/threads/{name}/{thread_id}/stream")
     async def thread_stream(name: str, thread_id: str, request: Request):
@@ -310,7 +444,9 @@ def build_router(connections_by_project: dict[Path, Connections], projects: list
         from sse_starlette.sse import EventSourceResponse
 
         async def _gen():
-            async for event in _stream_checkpoints(name, thread_id, _live_connections, request):
+            async for event in _stream_checkpoints(
+                name, thread_id, _live_connections, request
+            ):
                 yield event
 
         return EventSourceResponse(_gen())
@@ -406,7 +542,9 @@ async def _stream_checkpoints(
 # ---------------------------------------------------------------------------
 # Backend dispatch
 # ---------------------------------------------------------------------------
-async def _list_threads(conns: Connections, since: str | None, limit: int, offset: int) -> list[dict[str, Any]]:
+async def _list_threads(
+    conns: Connections, since: str | None, limit: int, offset: int
+) -> list[dict[str, Any]]:
     if conns.postgres:
         return await _pg_list(conns.postgres[0], since, limit, offset)
     # SQLite — union across every discovered DB.
@@ -418,11 +556,15 @@ async def _list_threads(conns: Connections, since: str | None, limit: int, offse
     return union[offset : offset + limit]
 
 
-async def _thread_detail(conns: Connections, thread_id: str, limit: int) -> list[dict[str, Any]]:
+async def _thread_detail(
+    conns: Connections, thread_id: str, limit: int
+) -> list[dict[str, Any]]:
     if conns.postgres:
         return await _pg_detail(conns.postgres[0], thread_id, limit)
     for sqlite_conn in conns.sqlite:
-        rows = await asyncio.to_thread(_sqlite_detail_sync, sqlite_conn, thread_id, limit)
+        rows = await asyncio.to_thread(
+            _sqlite_detail_sync, sqlite_conn, thread_id, limit
+        )
         if rows:
             return rows
     return []
@@ -431,13 +573,17 @@ async def _thread_detail(conns: Connections, thread_id: str, limit: int) -> list
 # ---------------------------------------------------------------------------
 # Postgres path
 # ---------------------------------------------------------------------------
-async def _pg_list(conn: PostgresConnection, since: str | None, limit: int, offset: int) -> list[dict[str, Any]]:
+async def _pg_list(
+    conn: PostgresConnection, since: str | None, limit: int, offset: int
+) -> list[dict[str, Any]]:
     psycopg = require("psycopg")
     rows: list[dict[str, Any]] = []
     sql = _PG_LIST_SQL
     params: tuple = (limit, offset)
     if since:
-        sql = sql.replace("LIMIT %s OFFSET %s", "WHERE checkpoint_id > %s LIMIT %s OFFSET %s")
+        sql = sql.replace(
+            "LIMIT %s OFFSET %s", "WHERE checkpoint_id > %s LIMIT %s OFFSET %s"
+        )
         # Note: simple form — re-emit with `since` in the WHERE clause when needed
     async with await psycopg.AsyncConnection.connect(conn.url) as pg:
         async with pg.cursor() as cur:
@@ -448,7 +594,9 @@ async def _pg_list(conn: PostgresConnection, since: str | None, limit: int, offs
     return rows
 
 
-async def _pg_detail(conn: PostgresConnection, thread_id: str, limit: int) -> list[dict[str, Any]]:
+async def _pg_detail(
+    conn: PostgresConnection, thread_id: str, limit: int
+) -> list[dict[str, Any]]:
     psycopg = require("psycopg")
     rows: list[dict[str, Any]] = []
     async with await psycopg.AsyncConnection.connect(conn.url) as pg:
@@ -474,26 +622,51 @@ def _sqlite_list_sync(conn: SqliteConnection, fetch_limit: int) -> list[dict[str
             for row in cur.fetchall():
                 decoded = _decode_checkpoint(row["type"], row["checkpoint"])
                 meta = _decode_metadata(row["type"], row["metadata"])
-                channel_values = decoded.get("channel_values") if isinstance(decoded, dict) else None
-                out.append({
-                    "thread_id": row["thread_id"],
-                    "latest_checkpoint_id": row["checkpoint_id"],
-                    "last_updated": (decoded.get("ts") if isinstance(decoded, dict) else None),
-                    "is_paused": isinstance(channel_values, dict) and "__interrupt__" in channel_values,
-                    "agent_profile": (channel_values.get("agent_profile") if isinstance(channel_values, dict) else None),
-                    "phase": (channel_values.get("phase") if isinstance(channel_values, dict) else None),
-                    "step": (meta.get("step") if isinstance(meta, dict) else None),
-                    "source": (meta.get("source") if isinstance(meta, dict) else None),
-                    "writes": (meta.get("writes") if isinstance(meta, dict) else None),
-                    "versions_seen": (decoded.get("versions_seen") if isinstance(decoded, dict) else None),
-                    "_db_path": conn.path,  # kept for debugging; not serialized to client
-                })
+                channel_values = (
+                    decoded.get("channel_values") if isinstance(decoded, dict) else None
+                )
+                out.append(
+                    {
+                        "thread_id": row["thread_id"],
+                        "latest_checkpoint_id": row["checkpoint_id"],
+                        "last_updated": (
+                            decoded.get("ts") if isinstance(decoded, dict) else None
+                        ),
+                        "is_paused": isinstance(channel_values, dict)
+                        and "__interrupt__" in channel_values,
+                        "agent_profile": (
+                            channel_values.get("agent_profile")
+                            if isinstance(channel_values, dict)
+                            else None
+                        ),
+                        "phase": (
+                            channel_values.get("phase")
+                            if isinstance(channel_values, dict)
+                            else None
+                        ),
+                        "step": (meta.get("step") if isinstance(meta, dict) else None),
+                        "source": (
+                            meta.get("source") if isinstance(meta, dict) else None
+                        ),
+                        "writes": (
+                            meta.get("writes") if isinstance(meta, dict) else None
+                        ),
+                        "versions_seen": (
+                            decoded.get("versions_seen")
+                            if isinstance(decoded, dict)
+                            else None
+                        ),
+                        "_db_path": conn.path,  # kept for debugging; not serialized to client
+                    }
+                )
     except sqlite3.Error:
         return []
     return out
 
 
-def _sqlite_detail_sync(conn: SqliteConnection, thread_id: str, limit: int) -> list[dict[str, Any]]:
+def _sqlite_detail_sync(
+    conn: SqliteConnection, thread_id: str, limit: int
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     try:
         with sqlite3.connect(f"file:{conn.path}?mode=ro", uri=True, timeout=2.0) as db:
@@ -502,17 +675,25 @@ def _sqlite_detail_sync(conn: SqliteConnection, thread_id: str, limit: int) -> l
             for row in cur.fetchall():
                 decoded = _decode_checkpoint(row["type"], row["checkpoint"])
                 meta = _decode_metadata(row["type"], row["metadata"])
-                out.append({
-                    "checkpoint_id": row["checkpoint_id"],
-                    "parent_checkpoint_id": row["parent_checkpoint_id"],
-                    "type": row["type"],
-                    "checkpoint": decoded,
-                    "metadata": meta,
-                    "ts": decoded.get("ts") if isinstance(decoded, dict) else None,
-                    "versions_seen": decoded.get("versions_seen") if isinstance(decoded, dict) else None,
-                    "step": meta.get("step") if isinstance(meta, dict) else None,
-                    "writes": meta.get("writes") if isinstance(meta, dict) else None,
-                })
+                out.append(
+                    {
+                        "checkpoint_id": row["checkpoint_id"],
+                        "parent_checkpoint_id": row["parent_checkpoint_id"],
+                        "type": row["type"],
+                        "checkpoint": decoded,
+                        "metadata": meta,
+                        "ts": decoded.get("ts") if isinstance(decoded, dict) else None,
+                        "versions_seen": (
+                            decoded.get("versions_seen")
+                            if isinstance(decoded, dict)
+                            else None
+                        ),
+                        "step": meta.get("step") if isinstance(meta, dict) else None,
+                        "writes": (
+                            meta.get("writes") if isinstance(meta, dict) else None
+                        ),
+                    }
+                )
     except sqlite3.Error:
         return []
     return out
@@ -584,7 +765,9 @@ def _serialize_thread(
     }
 
 
-def _resolve_grouping(thread_id: str, grouping: ThreadGrouping | None) -> dict[str, str]:
+def _resolve_grouping(
+    thread_id: str, grouping: ThreadGrouping | None
+) -> dict[str, str]:
     """Apply the metadata-provided regex patterns first; fall back to the
     generic heuristic if no pattern matches (or no metadata exists yet)."""
     if grouping and grouping.patterns:
@@ -599,7 +782,10 @@ def _resolve_grouping(thread_id: str, grouping: ThreadGrouping | None) -> dict[s
             return {
                 "scope_kind": rule.scope_kind or captured.get("scope_kind") or "thread",
                 "scope_id": captured.get("scope_id") or thread_id,
-                "stage": rule.stage or captured.get("stage") or rule.scope_kind or "thread",
+                "stage": rule.stage
+                or captured.get("stage")
+                or rule.scope_kind
+                or "thread",
                 "stage_detail": captured.get("stage_detail") or "",
             }
     # Fallback heuristic
@@ -618,7 +804,9 @@ def _serialize_checkpoint(row: dict[str, Any]) -> dict[str, Any]:
         "step": row.get("step"),
         "node": _derive_nodes(row)[0],
         "state": to_jsonable(redact(_unwrap_state(row.get("checkpoint")))),
-        "metadata": to_jsonable(redact(row["metadata"])) if row.get("metadata") else None,
+        "metadata": (
+            to_jsonable(redact(row["metadata"])) if row.get("metadata") else None
+        ),
     }
 
 

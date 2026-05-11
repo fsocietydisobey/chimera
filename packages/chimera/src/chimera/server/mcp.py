@@ -41,7 +41,13 @@ from chimera.prompts import (
     BRAINSTORM_SYSTEM_PROMPT,
     RESEARCH_SYSTEM_PROMPT,
 )
-from chimera.server.jobs import create_job, format_job_status, get_job, list_jobs, notify_job_update
+from chimera.server.jobs import (
+    create_job,
+    format_job_status,
+    get_job,
+    list_jobs,
+    notify_job_update,
+)
 
 log = get_logger("graph-server")
 
@@ -106,7 +112,9 @@ async def _get_hypervisor_graph():
     """Get or build the HVD graph (lazy async singleton)."""
     global _hypervisor_graph, _hypervisor_checkpointer
     if _hypervisor_graph is None:
-        _hypervisor_graph, _hypervisor_checkpointer = await build_hypervisor_graph(config)
+        _hypervisor_graph, _hypervisor_checkpointer = await build_hypervisor_graph(
+            config
+        )
     return _hypervisor_graph
 
 
@@ -114,7 +122,9 @@ async def _get_components_graph():
     """Get or build the ACL graph (lazy async singleton)."""
     global _components_graph, _components_checkpointer
     if _components_graph is None:
-        _components_graph, _components_checkpointer = await build_components_graph(config)
+        _components_graph, _components_checkpointer = await build_components_graph(
+            config
+        )
     return _components_graph
 
 
@@ -130,7 +140,9 @@ async def _get_toolbuilder_graph():
     """Get or build the POB graph (lazy async singleton)."""
     global _toolbuilder_graph, _toolbuilder_checkpointer
     if _toolbuilder_graph is None:
-        _toolbuilder_graph, _toolbuilder_checkpointer = await build_toolbuilder_graph(config)
+        _toolbuilder_graph, _toolbuilder_checkpointer = await build_toolbuilder_graph(
+            config
+        )
     return _toolbuilder_graph
 
 
@@ -185,7 +197,9 @@ async def research(question: str, context: str = "", cwd: str = "") -> str:
 
 @mcp.tool()
 @logged_tool("architect")
-async def architect(goal: str, context: str = "", constraints: str = "", cwd: str = "") -> str:
+async def architect(
+    goal: str, context: str = "", constraints: str = "", cwd: str = ""
+) -> str:
     """Design an implementation plan using Claude Code CLI.
 
     Writes `tasks/<slug>/IMPLEMENTATION.md` and `tasks/<slug>/TODO.md` into
@@ -240,7 +254,9 @@ def _save_brainstorm(topic: str, claude_out: str, base_dir: str) -> Path:
         candidate = folder / f"{slug}-{today}-{suffix}.md"
         suffix += 1
 
-    body = f"# Brainstorm — {topic}\n\n**Date:** {today}\n\n---\n\n{claude_out.strip()}\n"
+    body = (
+        f"# Brainstorm — {topic}\n\n**Date:** {today}\n\n---\n\n{claude_out.strip()}\n"
+    )
     candidate.write_text(body, encoding="utf-8")
     _open_in_default_app(candidate)
     return candidate
@@ -336,7 +352,10 @@ async def brainstorm(topic: str, context: str = "", cwd: str = "") -> str:
     # (Legacy code referenced `config.PROJECT_ROOT` which doesn't exist on the
     # new OrchestratorConfig schema.)
     import os as _os
-    target_cwd = cwd or _os.environ.get("PROJECT_ROOT") or _os.environ.get("PWD") or _os.getcwd()
+
+    target_cwd = (
+        cwd or _os.environ.get("PROJECT_ROOT") or _os.environ.get("PWD") or _os.getcwd()
+    )
 
     prompt = build_prompt(
         BRAINSTORM_SYSTEM_PROMPT,
@@ -348,7 +367,11 @@ async def brainstorm(topic: str, context: str = "", cwd: str = "") -> str:
     claude_out = await run_claude(prompt, cwd=target_cwd)
 
     saved = _save_brainstorm(topic, claude_out, target_cwd)
-    rel = saved.relative_to(target_cwd) if str(saved).startswith(str(target_cwd)) else saved
+    rel = (
+        saved.relative_to(target_cwd)
+        if str(saved).startswith(str(target_cwd))
+        else saved
+    )
     return f"Saved to `{rel}` ({len(claude_out)} chars)."
 
 
@@ -401,7 +424,9 @@ async def chain(task_description: str, context: str = "", thread_id: str = "") -
     async def _run():
         try:
             node_start = time.time()
-            async for update in graph.astream(initial_state, config=graph_config, stream_mode="updates"):
+            async for update in graph.astream(
+                initial_state, config=graph_config, stream_mode="updates"
+            ):
                 if update is None:
                     continue
                 for node_name, state_update in update.items():
@@ -448,7 +473,9 @@ async def chain(task_description: str, context: str = "", thread_id: str = "") -
 
 @mcp.tool()
 @logged_tool("chain_pipeline")
-async def chain_pipeline(task_description: str, context: str = "", thread_id: str = "") -> str:
+async def chain_pipeline(
+    task_description: str, context: str = "", thread_id: str = ""
+) -> str:
     """Start the SPR-4 pipeline (CHIMERA) in the background.
 
     SPR-4 runs a phased pipeline: research → planning → implementation → review.
@@ -479,7 +506,9 @@ async def chain_pipeline(task_description: str, context: str = "", thread_id: st
     async def _run():
         try:
             node_start = time.time()
-            async for update in graph.astream(initial_state, config=graph_config, stream_mode="updates"):
+            async for update in graph.astream(
+                initial_state, config=graph_config, stream_mode="updates"
+            ):
                 if update is None:
                     continue
                 for node_name, state_update in update.items():
@@ -501,7 +530,9 @@ async def chain_pipeline(task_description: str, context: str = "", thread_id: st
                 is_paused = any("human_review" in str(n) for n in next_nodes)
                 if is_paused:
                     job.status = "paused"
-                    job.progress.append("Paused — waiting for human approval (SPR-4 review phase)")
+                    job.progress.append(
+                        "Paused — waiting for human approval (SPR-4 review phase)"
+                    )
                     log.info("job %s: paused at review phase", job.job_id)
                     notify_job_update(job)
                     return
@@ -551,7 +582,9 @@ async def chain_refiner(max_cycles: int = 50, budget: float = 5.0) -> str:
 
     async def _run():
         try:
-            async for update in graph.astream(initial_state, config=graph_config, stream_mode="updates"):
+            async for update in graph.astream(
+                initial_state, config=graph_config, stream_mode="updates"
+            ):
                 if update is None:
                     continue
                 for node_name, state_update in update.items():
@@ -559,8 +592,16 @@ async def chain_refiner(max_cycles: int = 50, budget: float = 5.0) -> str:
                         continue
                     if isinstance(state_update, dict):
                         job.result.update(state_update)
-                    cycle = state_update.get("cycle_count", "") if isinstance(state_update, dict) else ""
-                    message = f"[cycle {cycle}] {node_name}: completed" if cycle else f"{node_name}: completed"
+                    cycle = (
+                        state_update.get("cycle_count", "")
+                        if isinstance(state_update, dict)
+                        else ""
+                    )
+                    message = (
+                        f"[cycle {cycle}] {node_name}: completed"
+                        if cycle
+                        else f"{node_name}: completed"
+                    )
                     job.progress.append(message)
 
             job.status = "completed"
@@ -596,7 +637,12 @@ async def swarm(goal: str, budget: float = 2.0, max_agents: int = 10) -> str:
         budget: Maximum estimated cost in USD (default 2.0).
         max_agents: Maximum parallel workers (default 10).
     """
-    log.info("swarm() called — goal: %s, budget=$%.2f, max_agents=%d", goal[:80], budget, max_agents)
+    log.info(
+        "swarm() called — goal: %s, budget=$%.2f, max_agents=%d",
+        goal[:80],
+        budget,
+        max_agents,
+    )
     graph = await _get_swarm_graph()
 
     job = create_job()
@@ -608,7 +654,9 @@ async def swarm(goal: str, budget: float = 2.0, max_agents: int = 10) -> str:
 
     async def _run():
         try:
-            async for update in graph.astream(initial_state, config=graph_config, stream_mode="updates"):
+            async for update in graph.astream(
+                initial_state, config=graph_config, stream_mode="updates"
+            ):
                 if update is None:
                     continue
                 for node_name, state_update in update.items():
@@ -618,11 +666,19 @@ async def swarm(goal: str, budget: float = 2.0, max_agents: int = 10) -> str:
                         job.result.update(state_update)
                     message = f"{node_name}: completed"
                     if node_name == "decomposer":
-                        manifest = state_update.get("swarm_manifest", {}) if isinstance(state_update, dict) else {}
+                        manifest = (
+                            state_update.get("swarm_manifest", {})
+                            if isinstance(state_update, dict)
+                            else {}
+                        )
                         tasks = manifest.get("tasks", [])
                         message = f"Decomposer: decomposed into {len(tasks)} tasks"
                     elif node_name == "merge":
-                        outcome = state_update.get("swarm_outcome", "?") if isinstance(state_update, dict) else "?"
+                        outcome = (
+                            state_update.get("swarm_outcome", "?")
+                            if isinstance(state_update, dict)
+                            else "?"
+                        )
                         message = f"Merge: {outcome}"
                     job.progress.append(message)
 
@@ -669,7 +725,9 @@ async def chain_hypervisor(budget: float = 10.0) -> str:
 
     async def _run():
         try:
-            async for update in graph.astream(initial_state, config=graph_config, stream_mode="updates"):
+            async for update in graph.astream(
+                initial_state, config=graph_config, stream_mode="updates"
+            ):
                 if update is None:
                     continue
                 for node_name, state_update in update.items():
@@ -677,7 +735,11 @@ async def chain_hypervisor(budget: float = 10.0) -> str:
                         continue
                     if isinstance(state_update, dict):
                         job.result.update(state_update)
-                    cycle = state_update.get("hypervisor_cycle", "") if isinstance(state_update, dict) else ""
+                    cycle = (
+                        state_update.get("hypervisor_cycle", "")
+                        if isinstance(state_update, dict)
+                        else ""
+                    )
                     message = f"HVD [{node_name}]"
                     if cycle:
                         message += f" cycle {cycle}"
@@ -721,7 +783,9 @@ async def chain_components() -> str:
 
     async def _run():
         try:
-            async for update in graph.astream(initial_state, config=graph_config, stream_mode="updates"):
+            async for update in graph.astream(
+                initial_state, config=graph_config, stream_mode="updates"
+            ):
                 if update is None:
                     continue
                 for node_name, state_update in update.items():
@@ -769,7 +833,9 @@ async def chain_deadcode() -> str:
 
     async def _run():
         try:
-            async for update in graph.astream(initial_state, config=graph_config, stream_mode="updates"):
+            async for update in graph.astream(
+                initial_state, config=graph_config, stream_mode="updates"
+            ):
                 if update is None:
                     continue
                 for node_name, state_update in update.items():
@@ -817,7 +883,9 @@ async def chain_toolbuilder() -> str:
 
     async def _run():
         try:
-            async for update in graph.astream(initial_state, config=graph_config, stream_mode="updates"):
+            async for update in graph.astream(
+                initial_state, config=graph_config, stream_mode="updates"
+            ):
                 if update is None:
                     continue
                 for node_name, state_update in update.items():
@@ -900,7 +968,9 @@ async def approve(job_id: str, feedback: str = "") -> str:
         resume_value = {"decision": "approved", "feedback": ""}
 
     job.status = "running"
-    job.progress.append(f"Resumed — {'rejected with feedback' if feedback else 'approved'}")
+    job.progress.append(
+        f"Resumed — {'rejected with feedback' if feedback else 'approved'}"
+    )
 
     async def _run_resume():
         try:
@@ -969,7 +1039,11 @@ async def history(thread_id: str, limit: int = 10) -> str:
         source = metadata.get("source", "?")
 
         values = snapshot.values or {}
-        has = [k for k in ["research_findings", "architecture_plan", "implementation_result"] if values.get(k)]
+        has = [
+            k
+            for k in ["research_findings", "architecture_plan", "implementation_result"]
+            if values.get(k)
+        ]
 
         entry = (
             f"### Step {step} (`{checkpoint_id[:12]}...`)\n"
@@ -1112,7 +1186,9 @@ def _build_pipeline_progress_message(node_name: str, state_update: dict) -> str:
         handoff = state_update.get("handoff_type", "")
         if new_phase == "done":
             return f"{phase_tag}Phase router: finishing"
-        return f"Phase router → {new_phase}" + (f" (handoff={handoff})" if handoff else "")
+        return f"Phase router → {new_phase}" + (
+            f" (handoff={handoff})" if handoff else ""
+        )
 
     # Memory nodes
     if node_name == "load_memory":
@@ -1121,7 +1197,12 @@ def _build_pipeline_progress_message(node_name: str, state_update: dict) -> str:
         return "Saving run memory"
 
     # Subgraph nodes — add phase tag
-    if node_name in ("research_phase", "planning_phase", "implementation_phase", "review_phase"):
+    if node_name in (
+        "research_phase",
+        "planning_phase",
+        "implementation_phase",
+        "review_phase",
+    ):
         # Subgraph wrapper updates — extract inner details
         return f"{phase_tag}{node_name.replace('_', ' ').title()}: completed"
 
@@ -1156,7 +1237,9 @@ def _format_graph_result(state: dict) -> str:
     if history_list:
         journey = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(history_list))
         calls = ", ".join(f"{k}: {v}" for k, v in sorted(node_calls.items()))
-        output_parts.append(f"## Supervisor Journey\n\n{journey}\n\n**Node calls:** {calls}")
+        output_parts.append(
+            f"## Supervisor Journey\n\n{journey}\n\n**Node calls:** {calls}"
+        )
 
     review_status = state.get("human_review_status", "")
     if review_status:
@@ -1255,6 +1338,12 @@ async def monitor_active_runs(project: str) -> str:
     nodes, per-project running thresholds, and per-node observed
     p95 latencies — trust it.
 
+    🛑 SNAPSHOT, not a watcher. If you're about to `sleep` and call
+    this again, STOP — use `wait_for_run(project, thread_id)` instead.
+    It blocks server-side until the run is done (or hits your target
+    node / status) and returns in ONE MCP call. Don't burn cache and
+    tool budget polling.
+
     Args:
         project: Project name as discovered by `monitor_projects()`.
     """
@@ -1277,6 +1366,46 @@ async def monitor_thread_state(project: str, thread_id: str, recent: int = 5) ->
         recent: How many most-recent checkpoints to include (1-50, default 5).
     """
     return await _monitor_tools.thread_state(project, thread_id, recent)
+
+
+@mcp.tool()
+@logged_tool("wait_for_run")
+async def wait_for_run(
+    project: str,
+    thread_id: str,
+    until_status: str | None = None,
+    until_node: str | None = None,
+    timeout_s: float = 300.0,
+) -> str:
+    """**Blocking call — wait for a LangGraph run to reach a target state.**
+
+    ⚠️ Use this INSTEAD of `sleep + monitor_active_runs` polling. The
+    daemon does the polling server-side and returns ONE response when
+    your condition is met. Single MCP roundtrip replaces N polls.
+
+    Common patterns:
+      - "wait until this ingest run finishes":
+          wait_for_run("jeevy_portal", "deliverable:abc123:i")
+      - "wait until the run reaches the vectorize node":
+          wait_for_run("jeevy_portal", "deliverable:abc:i", until_node="vectorize")
+      - "wait until run goes paused (HITL gate)":
+          wait_for_run("chimera", "thread-x", until_status="paused")
+
+    Default exit: any non-in-flight status (idle / paused / terminal).
+    Override with until_status or until_node for intermediate stops.
+
+    Args:
+        project: project name (e.g. "jeevy_portal", "chimera").
+        thread_id: thread/run id to watch. Find it via `monitor_active_runs`.
+        until_status: target status ("idle", "paused", "running"). None
+            (default) = first non-in-flight status (the natural "done").
+        until_node: optional. Returns when the run reaches this node.
+        timeout_s: max wall time. Default 300s. Returns reason=timeout
+            if the run is still in-flight; call again to keep waiting.
+    """
+    return await _monitor_tools.wait_for_run(
+        project, thread_id, until_status, until_node, timeout_s
+    )
 
 
 @mcp.tool()
@@ -1325,7 +1454,8 @@ async def monitor_auto_fix(check: str, project: str = "") -> str:
     # Find the most-recent matching anomaly
     items = anomalies_module.recent_anomalies(limit=100)
     matching = [
-        it for it in items
+        it
+        for it in items
         if it.get("check") == check
         and (not project or it.get("project") == project)
         and not it.get("passed", True)
@@ -1335,7 +1465,9 @@ async def monitor_auto_fix(check: str, project: str = "") -> str:
     anomaly = matching[-1]  # most-recent in append order
 
     proposal = await auto_fix.propose_fix(anomaly)
-    gh_status = "✓ available" if auto_fix.is_gh_available() else "✗ not installed/authenticated"
+    gh_status = (
+        "✓ available" if auto_fix.is_gh_available() else "✗ not installed/authenticated"
+    )
 
     return (
         f"**Auto-fix proposal saved.**\n\n"
@@ -1391,7 +1523,9 @@ async def monitor_api_routes(project: str, graph_linked_only: bool = False) -> s
 
 @mcp.tool()
 @logged_tool("monitor_frontend_components")
-async def monitor_frontend_components(project: str, with_api_calls_only: bool = False) -> str:
+async def monitor_frontend_components(
+    project: str, with_api_calls_only: bool = False
+) -> str:
     """React/Next components in a project + their API calls + state hooks.
 
     Companion to `monitor_api_routes` — together they let
@@ -1585,7 +1719,9 @@ async def session_log_touch(
         summary: short description ("refactored auth gate", "added type hints").
         line_start, line_end: optional line range.
     """
-    return await _monitor_tools.session_log_touch(session_id, file, summary, line_start, line_end)
+    return await _monitor_tools.session_log_touch(
+        session_id, file, summary, line_start, line_end
+    )
 
 
 @mcp.tool()
@@ -1635,7 +1771,9 @@ async def session_log_question(
             question is directed at. None = broadcast.
     """
     return await _monitor_tools.session_log_question(
-        session_id, text, target_session_id=target_session_id,
+        session_id,
+        text,
+        target_session_id=target_session_id,
     )
 
 
@@ -1715,7 +1853,10 @@ async def session_query_transcript(
         max_matches: cap result set (20 default).
     """
     return await _monitor_tools.session_query_transcript(
-        session_id, query, context_lines, max_matches,
+        session_id,
+        query,
+        context_lines,
+        max_matches,
     )
 
 
@@ -1855,7 +1996,10 @@ async def session_post_handoff(
             permanent context, smaller for time-bounded asks.
     """
     return await _monitor_tools.session_post_handoff(
-        from_session_id, text, scope_cwd, expires_in_hours,
+        from_session_id,
+        text,
+        scope_cwd,
+        expires_in_hours,
     )
 
 
@@ -1888,7 +2032,9 @@ async def session_post_notice(
             target's inbox). Defaults to "external" if you don't pass it.
     """
     return await _monitor_tools.session_post_notice(
-        target_session_id, text, from_session_id,
+        target_session_id,
+        text,
+        from_session_id,
     )
 
 
@@ -2013,7 +2159,10 @@ async def session_post_answer(
         from_session_id: optional — your session id, for attribution.
     """
     return await _monitor_tools.session_post_answer(
-        target_session_id, question_id, answer, from_session_id,
+        target_session_id,
+        question_id,
+        answer,
+        from_session_id,
     )
 
 

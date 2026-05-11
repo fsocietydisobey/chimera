@@ -24,9 +24,9 @@ from typing import Any
 
 # Default to the monitor daemon's bind address. Override with
 # CHIMERA_MONITOR_URL if the daemon runs elsewhere (rare).
-_DEFAULT_BASE = os.environ.get(
-    "CHIMERA_MONITOR_URL", "http://127.0.0.1:8740"
-).rstrip("/")
+_DEFAULT_BASE = os.environ.get("CHIMERA_MONITOR_URL", "http://127.0.0.1:8740").rstrip(
+    "/"
+)
 
 _DAEMON_DOWN_HINT = (
     "chimera-monitor daemon is not running or unreachable at {base}.\n"
@@ -35,7 +35,9 @@ _DAEMON_DOWN_HINT = (
 )
 
 
-def _get(path: str, *, base: str = _DEFAULT_BASE, timeout: float = 5.0) -> dict[str, Any] | str:
+def _get(
+    path: str, *, base: str = _DEFAULT_BASE, timeout: float = 5.0
+) -> dict[str, Any] | str:
     """GET request → parsed JSON, or a friendly error string on failure.
 
     Error mapping (matches _post's pattern — earlier this was a bug:
@@ -96,7 +98,9 @@ def _post(
     url = f"{base}{path}"
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        url, data=data, method="POST",
+        url,
+        data=data,
+        method="POST",
         headers={"Content-Type": "application/json"},
     )
     try:
@@ -132,7 +136,10 @@ async def list_projects() -> str:
     lines = [f"**{len(data)} projects:**\n"]
     for p in data:
         conns = p.get("connections", [])
-        conn_summary = ", ".join(f"{c['kind']}:{c.get('label', '?')}" for c in conns) or "no checkpointer"
+        conn_summary = (
+            ", ".join(f"{c['kind']}:{c.get('label', '?')}" for c in conns)
+            or "no checkpointer"
+        )
         lines.append(f"- `{p['name']}` — {p['path']} ({conn_summary})")
     return "\n".join(lines)
 
@@ -171,7 +178,9 @@ async def thread_state(project: str, thread_id: str, recent: int = 5) -> str:
         recent: How many checkpoints to include (default 5, max 50)
     """
     recent = max(1, min(50, recent))
-    data = _get(f"/api/threads/{urllib.parse.quote(project)}/{urllib.parse.quote(thread_id, safe='')}?limit={recent}")
+    data = _get(
+        f"/api/threads/{urllib.parse.quote(project)}/{urllib.parse.quote(thread_id, safe='')}?limit={recent}"
+    )
     if isinstance(data, str):
         return data
 
@@ -191,6 +200,72 @@ async def thread_state(project: str, thread_id: str, recent: int = 5) -> str:
             f"keys={keys[:10]}{'...' if len(keys) > 10 else ''}"
         )
     return "\n".join(lines)
+
+
+async def wait_for_run(
+    project: str,
+    thread_id: str,
+    until_status: str | None = None,
+    until_node: str | None = None,
+    timeout_s: float = 300.0,
+) -> str:
+    """**Blocking call — wait for a LangGraph run to reach a target state.**
+
+    Replaces the polling pattern `sleep(N); monitor_active_runs(); …` with
+    ONE MCP roundtrip. The daemon polls the checkpointer on your behalf
+    and returns when the run is terminal (default), reaches `until_node`,
+    matches `until_status`, or `timeout_s` elapses.
+
+    Default behavior: returns when status leaves the in-flight set
+    (running, starting) — i.e. the run hit idle / paused / terminal.
+
+    Args:
+        project: project name (e.g. "jeevy_portal", "chimera").
+        thread_id: thread/run id to watch.
+        until_status: target status ("idle", "paused", "running"). None
+            (default) = wait for any non-in-flight status.
+        until_node: optional. Return when current_node == this string.
+            Useful for "wait until the run reaches `vectorize`".
+        timeout_s: max wall time. Default 300s. Returns reason=timeout.
+    """
+    client_timeout = timeout_s + 30.0
+    params = {"timeout_s": str(timeout_s)}
+    if until_status:
+        params["until_status"] = until_status
+    if until_node:
+        params["until_node"] = until_node
+    qs = "&".join(f"{k}={urllib.parse.quote(v)}" for k, v in params.items())
+    data = _get(
+        f"/api/threads/{urllib.parse.quote(project)}/"
+        f"{urllib.parse.quote(thread_id, safe='')}/wait?{qs}",
+        timeout=client_timeout,
+    )
+    if isinstance(data, str):
+        return data
+
+    reason = data.get("reason", "?")
+    elapsed = data.get("elapsed_s", 0.0)
+    summary = data.get("summary") or {}
+    status = summary.get("status", "?")
+    current_node = summary.get("current_node", "-")
+    step = summary.get("step", "?")
+
+    parts = [
+        f"**`{thread_id}`** in `{project}` — {reason} after {elapsed:.1f}s",
+        f"status: **{status}**  node: `{current_node}`  step: {step}",
+    ]
+    if reason == "timeout":
+        parts.append(
+            f"⚠️ timed out after {timeout_s}s — run may still be in flight; "
+            f"call again with a higher timeout_s, or pass until_node to wait "
+            f"for a specific intermediate state."
+        )
+    elif reason == "not_found":
+        parts.append(
+            f"⚠️ thread {thread_id!r} not found in project. "
+            f"Check `monitor_active_runs({project!r})` for live thread ids."
+        )
+    return "\n".join(parts)
 
 
 async def find_stuck(project: str) -> str:
@@ -229,7 +304,9 @@ async def find_stuck(project: str) -> str:
     if not stuck and not stale:
         return f"No stuck or stale threads in `{project}`."
 
-    lines = [f"**`{project}` — {len(stuck)} stuck, {len(stale)} stale** (threshold={threshold}s)\n"]
+    lines = [
+        f"**`{project}` — {len(stuck)} stuck, {len(stale)} stale** (threshold={threshold}s)\n"
+    ]
     for age, t in sorted(stuck, key=lambda x: -x[0]):
         lines.append(
             f"🔴 STUCK  `{t['thread_id'][:50]}`  @{t.get('current_node') or '-'}"
@@ -301,7 +378,8 @@ async def anomalies(limit: int = 20, only_failures: bool = True) -> str:
     if not items:
         return "No anomalies in the recent log." + (
             " Pass `only_failures=False` to see passing checks too."
-            if only_failures else ""
+            if only_failures
+            else ""
         )
     lines = [f"**{len(items)} anomaly entries** (most recent first):\n"]
     for item in reversed(items):
@@ -310,9 +388,7 @@ async def anomalies(limit: int = 20, only_failures: bool = True) -> str:
         passed = "✓" if item.get("passed") else "✗"
         proj = item.get("project") or "*"
         ts = (item.get("timestamp") or "")[:19]
-        lines.append(
-            f"{icon} {passed} `{item.get('check')}`  proj={proj}  {ts}"
-        )
+        lines.append(f"{icon} {passed} `{item.get('check')}`  proj={proj}  {ts}")
         if item.get("detail"):
             lines.append(f"    {item['detail']}")
         if item.get("evidence"):
@@ -339,7 +415,9 @@ async def frontend_components(project: str, with_api_calls_only: bool = False) -
         f"**`{project}` — {len(comps)} component(s)** "
         f"({data.get('with_api_calls', 0)} make API calls)\n"
     ]
-    comps.sort(key=lambda c: (not c.get("api_calls"), c.get("file", ""), c.get("line", 0)))
+    comps.sort(
+        key=lambda c: (not c.get("api_calls"), c.get("file", ""), c.get("line", 0))
+    )
     for c in comps[:60]:  # cap output for chat readability
         marker = "→api" if c.get("api_calls") else "    "
         loc = f"{c.get('file', '?')}:{c.get('line', 0)}"
@@ -374,7 +452,9 @@ async def schema_drift(project: str) -> str:
     for r in drifty[:20]:
         loc = f"{r.get('file', '?')}:{r.get('line', 0)}"
         if not r.get("table_exists"):
-            lines.append(f"❌ `{r.get('model')}` → table `{r.get('table')}` MISSING  ({loc})")
+            lines.append(
+                f"❌ `{r.get('model')}` → table `{r.get('table')}` MISSING  ({loc})"
+            )
             continue
         bits = []
         if r.get("only_in_model"):
@@ -382,8 +462,10 @@ async def schema_drift(project: str) -> str:
         if r.get("only_in_db"):
             bits.append(f"in DB only: {r['only_in_db']}")
         if r.get("type_mismatches"):
-            mm = [f"{m['field']}({m['model_type']}→{m['db_type']})"
-                  for m in r['type_mismatches']]
+            mm = [
+                f"{m['field']}({m['model_type']}→{m['db_type']})"
+                for m in r["type_mismatches"]
+            ]
             bits.append(f"type mismatch: {', '.join(mm)}")
         lines.append(f"⚠️ `{r.get('model')}` ↔ `{r.get('table')}`  ({loc})")
         for b in bits:
@@ -456,8 +538,11 @@ async def spawn_process(
     data = _post(
         "/api/processes/spawn",
         {
-            "cmd": cmd, "label": label, "cwd": cwd,
-            "env": env, "replace_existing": replace_existing,
+            "cmd": cmd,
+            "label": label,
+            "cwd": cwd,
+            "env": env,
+            "replace_existing": replace_existing,
         },
         timeout=10.0,
     )
@@ -512,9 +597,13 @@ async def wait_for_process(
     stdout = (data.get("stdout_text") or "").strip()
     stderr = (data.get("stderr_text") or "").strip()
     if stdout:
-        parts.append(f"\n**stdout** ({len(stdout)} chars):\n```\n{_tail(stdout, 4000)}\n```")
+        parts.append(
+            f"\n**stdout** ({len(stdout)} chars):\n```\n{_tail(stdout, 4000)}\n```"
+        )
     if stderr:
-        parts.append(f"\n**stderr** ({len(stderr)} chars):\n```\n{_tail(stderr, 2000)}\n```")
+        parts.append(
+            f"\n**stderr** ({len(stderr)} chars):\n```\n{_tail(stderr, 2000)}\n```"
+        )
     return "\n".join(parts)
 
 
@@ -539,9 +628,13 @@ async def follow_process(label: str, max_chunks: int = 100) -> str:
     stdout = (data.get("stdout_text") or "").strip()
     stderr = (data.get("stderr_text") or "").strip()
     if stdout:
-        parts.append(f"\n**stdout** ({len(stdout)} chars):\n```\n{_tail(stdout, 4000)}\n```")
+        parts.append(
+            f"\n**stdout** ({len(stdout)} chars):\n```\n{_tail(stdout, 4000)}\n```"
+        )
     if stderr:
-        parts.append(f"\n**stderr** ({len(stderr)} chars):\n```\n{_tail(stderr, 2000)}\n```")
+        parts.append(
+            f"\n**stderr** ({len(stderr)} chars):\n```\n{_tail(stderr, 2000)}\n```"
+        )
     return "\n".join(parts)
 
 
@@ -726,7 +819,12 @@ async def session_log_touch(
     on Edit/Write/MultiEdit — agent doesn't have to remember manually."""
     data = _post(
         f"/api/sessions/{urllib.parse.quote(session_id)}/touch",
-        {"file": file, "summary": summary, "line_start": line_start, "line_end": line_end},
+        {
+            "file": file,
+            "summary": summary,
+            "line_start": line_start,
+            "line_end": line_end,
+        },
         timeout=10.0,
     )
     if isinstance(data, str):
@@ -763,9 +861,7 @@ async def session_log_question(
     )
     if isinstance(data, str):
         return data
-    target_note = (
-        f" (targeted at {target_session_id})" if target_session_id else ""
-    )
+    target_note = f" (targeted at {target_session_id})" if target_session_id else ""
     return (
         f"❓ question opened (id={data['id']}){target_note}: {text[:120]}\n"
         f"Other sessions can answer with `session_post_answer(target_session_id='{session_id}', "
@@ -779,7 +875,9 @@ async def session_search_archive(
     limit: int = 50,
 ) -> str:
     """Search archived inbox notes by substring."""
-    qstr = f"?q={urllib.parse.quote(query)}&limit={limit}" if query else f"?limit={limit}"
+    qstr = (
+        f"?q={urllib.parse.quote(query)}&limit={limit}" if query else f"?limit={limit}"
+    )
     data = _get(
         f"/api/sessions/{urllib.parse.quote(session_id)}/inbox/archive{qstr}",
         timeout=10.0,
@@ -865,7 +963,9 @@ async def session_query_transcript(
             lines.append(f"  {marker} [{role}] {preview}")
         lines.append("")
     if data.get("truncated"):
-        lines.append(f"(truncated at {max_matches} matches; refine query or raise max_matches)")
+        lines.append(
+            f"(truncated at {max_matches} matches; refine query or raise max_matches)"
+        )
     return "\n".join(lines)
 
 
@@ -899,12 +999,16 @@ async def session_summarize_transcript(
     for u in data.get("user_messages_recent", []):
         lines.append(f"    > {u[:200]}")
     lines.append("")
-    lines.append(f"  recent assistant message intros ({data.get('assistant_text_count', 0)} total):")
+    lines.append(
+        f"  recent assistant message intros ({data.get('assistant_text_count', 0)} total):"
+    )
     for a in data.get("assistant_text_recent_intros", []):
         lines.append(f"    · {a[:200]}")
     if data.get("focus_query"):
         lines.append("")
-        lines.append(f"  focus={data['focus_query']!r}: {data.get('focus_match_count', 0)} matches")
+        lines.append(
+            f"  focus={data['focus_query']!r}: {data.get('focus_match_count', 0)} matches"
+        )
         for m in data.get("focus_matches", [])[:5]:
             for ex in m.get("excerpt", []):
                 if ex.get("is_match"):
@@ -1138,7 +1242,11 @@ async def session_post_answer(
     """
     data = _post(
         f"/api/sessions/{urllib.parse.quote(target_session_id)}/answer",
-        {"question_id": question_id, "answer": answer, "from_session_id": from_session_id},
+        {
+            "question_id": question_id,
+            "answer": answer,
+            "from_session_id": from_session_id,
+        },
         timeout=10.0,
     )
     if isinstance(data, str):
@@ -1197,7 +1305,9 @@ async def session_state(session_id: str, recent: int = 10) -> str:
                 if f.get("line_start") and f.get("line_end")
                 else ""
             )
-            parts.append(f"- {f.get('file', '')}{range_str} — {f.get('summary', '')[:100]}")
+            parts.append(
+                f"- {f.get('file', '')}{range_str} — {f.get('summary', '')[:100]}"
+            )
 
     return "\n".join(parts)
 
@@ -1303,8 +1413,7 @@ async def session_recent_decisions(recent_per_session: int = 5) -> str:
     parts = [f"**{len(decisions)} recent decision(s):**\n"]
     for d in decisions[:30]:
         parts.append(
-            f"- ({d.get('session_id')}, {d.get('ts')}): "
-            f"{d.get('text', '')[:180]}"
+            f"- ({d.get('session_id')}, {d.get('ts')}): " f"{d.get('text', '')[:180]}"
         )
     return "\n".join(parts)
 
