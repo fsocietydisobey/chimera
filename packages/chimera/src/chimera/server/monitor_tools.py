@@ -1092,6 +1092,86 @@ async def session_invite_handoff(
     )
 
 
+async def session_consume_handoffs(session_id: str, cwd: str) -> str:
+    """Pull cwd-scoped handoffs into this session mid-flight.
+
+    SessionStart's auto-surfacing only fires once per session boot.
+    When a handoff is posted AFTER a session has started, that session
+    can't see it unless someone calls this. Wraps the daemon's
+    /api/handoffs/consume endpoint — same auto-claim semantics as
+    SessionStart (first session to consume becomes owner; subsequent
+    sessions are observers).
+
+    Args:
+        session_id: this session's id (the one consuming).
+        cwd: working directory to match handoff scope against. Pass
+            the project root you're working in, not the chimera
+            install dir — handoffs are scoped to where the work
+            lives, and the MCP server's cwd is the wrong source.
+    """
+    qs = (
+        f"session_id={urllib.parse.quote(session_id)}" f"&cwd={urllib.parse.quote(cwd)}"
+    )
+    data = _get(f"/api/handoffs/consume?{qs}", timeout=10.0)
+    if isinstance(data, str):
+        return data
+
+    handoffs = data.get("handoffs", [])
+    if not handoffs:
+        return f"📭 no new handoffs in scope {cwd!r} for session {session_id[:8]}."
+
+    # Mirror the SessionStart hook's framing so the agent gets the
+    # same directive tone whether the handoff arrived at boot or
+    # mid-session. Split by claim role (owner / observer) the same way.
+    owned = [h for h in handoffs if h.get("_claim_role", "owner") == "owner"]
+    observed = [h for h in handoffs if h.get("_claim_role") == "observer"]
+
+    lines: list[str] = []
+    if owned:
+        lines.append(
+            f"📦 chimera handoffs — {len(owned)} directive(s) you now OWN in {cwd}:"
+        )
+        lines.append("")
+        for h in owned:
+            from_id = (h.get("from_session_id") or "?")[:8]
+            ts = (h.get("ts") or "")[:19]
+            text = (h.get("text") or "").strip()
+            parent = h.get("parent_id")
+            target = h.get("target_session_id")
+            if parent and target:
+                lines.append(
+                    f"- 🤝 [INVITE handoff {h['id'][:8]} · {ts} · from {from_id}]"
+                )
+            else:
+                lines.append(f"- [handoff {h['id'][:8]} · {ts} · from {from_id}]")
+            lines.append(f"  {text}")
+            lines.append("")
+        lines.append(
+            "Treat these as directives, not FYIs. Read referenced files, "
+            "pick the highest-priority item, propose a first action, and START. "
+            "Use `session_release_handoff(id, me)` if you finish or this isn't your lane."
+        )
+
+    if observed:
+        if owned:
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+        lines.append(
+            f"👀 chimera handoffs — {len(observed)} already-claimed handoff(s) in {cwd}:"
+        )
+        for h in observed:
+            from_id = (h.get("from_session_id") or "?")[:8]
+            owner = (h.get("_owner_session_id") or "?")[:8]
+            text = (h.get("text") or "").strip()
+            lines.append(
+                f"- [handoff {h['id'][:8]} · from {from_id} · OWNED BY {owner}]"
+            )
+            lines.append(f"  {text[:400]}{'…' if len(text) > 400 else ''}")
+
+    return "\n".join(lines)
+
+
 async def session_post_handoff(
     from_session_id: str,
     text: str,

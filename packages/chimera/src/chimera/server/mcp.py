@@ -1965,6 +1965,29 @@ async def session_invite_handoff(
 
 
 @mcp.tool()
+@logged_tool("session_consume_handoffs")
+async def session_consume_handoffs(session_id: str, cwd: str) -> str:
+    """**Pull cwd-scoped handoffs mid-session.** SessionStart's
+    auto-surfacing only fires at boot, so handoffs posted to your
+    project AFTER you started can't reach you without this call.
+
+    Same semantics as SessionStart: auto-claims ownership (first
+    consumer becomes owner), surfaces full directive framing for
+    owned handoffs, observer view for ones another session already
+    claimed. Idempotent — re-calling returns nothing new for handoffs
+    you've already consumed.
+
+    Args:
+        session_id: this session's id.
+        cwd: project working directory to scope by. Pass the dir
+            where your work lives, not the chimera install path —
+            handoffs are scoped to the project the prior session
+            was working in.
+    """
+    return await _monitor_tools.session_consume_handoffs(session_id, cwd)
+
+
+@mcp.tool()
 @logged_tool("session_post_handoff")
 async def session_post_handoff(
     from_session_id: str,
