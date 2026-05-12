@@ -1,0 +1,156 @@
+name: bootstrap-e2e
+
+# End-to-end test of `chimera bootstrap` against a synthetic profile.
+# Catches the class of bugs that consumed six rounds of debugging
+# during cross-machine setup: dotfiles symlinks landing wrong,
+# install-hooks crashing on wheel installs, supervisor unit content
+# drift, .venv/bin/chimera disappearing after `uv sync`.
+#
+# Doesn't test the supervisor install or SPA build here — both have
+# real side effects (systemd user units, npm-heavy build) that don't
+# belong on a CI runner. Those land in dedicated jobs if/when we need
+# coverage for the platform-specific install dispatchers.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  bootstrap:
+    name: bootstrap e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # for hatch-vcs
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: setup python
+        run: uv python install 3.13
+
+      - name: sync workspace
+        run: uv sync --all-packages
+
+      - name: build a synthetic dotfiles repo
+        # The bootstrap profile assumes a dotfiles repo at a clonable
+        # URL with a specific layout (claude/CLAUDE.md, claude/rules/,
+        # claude/commands/). We construct one on the runner and serve
+        # it via a local file:// remote so the chimera bootstrap path
+        # exercises clone + symlink without depending on GitHub auth.
+        run: |
+          set -euxo pipefail
+          DOTFILES=${{ runner.temp }}/dotfiles
+          mkdir -p $DOTFILES/claude/{rules/personal,rules/engineering,commands}
+          echo "# synthetic CLAUDE.md" > $DOTFILES/claude/CLAUDE.md
+          echo "# synthetic personal rule" > $DOTFILES/claude/rules/personal/approach.md
+          echo "# synthetic eng rule" > $DOTFILES/claude/rules/engineering/conventions.md
+          echo "# synthetic /tools" > $DOTFILES/claude/commands/tools.md
+          cd $DOTFILES
+          git init -q -b main
+          git config user.email "ci@chimera.test"
+          git config user.name "chimera-ci"
+          git add .
+          git commit -qm "synthetic dotfiles for bootstrap e2e test"
+          # Mirror to a bare 'remote' so clone exercises the real path
+          git clone --bare $DOTFILES ${{ runner.temp }}/dotfiles.git
+
+      - name: write synthetic chimera-profile.yaml
+        # Profile sized to the CI runner's actual capabilities:
+        # - dotfiles points at the bare repo we just built
+        # - repos section is empty (chimera itself is the workspace
+        #   we're already running from)
+        # - mcp_servers contains chimera only; claude CLI isn't on the
+        #   runner so register_mcp will return `skipped` gracefully
+        # - supervisor + spa_build off (CI shouldn't write systemd units)
+        # - install_claude_hooks ON because that's the actual class of
+        #   bug we're trying to catch (issue 3 regressions)
+        run: |
+          cat > ${{ runner.temp }}/profile.yaml <<EOF
+          name: ci-bootstrap-test
+          description: Synthetic profile exercising bootstrap operations on CI.
+          dotfiles:
+            repo: ${{ runner.temp }}/dotfiles.git
+            path: ${{ runner.temp }}/dotfiles-clone
+            symlinks:
+              - { src: claude/CLAUDE.md, dest: ${{ runner.temp }}/fake-home/.claude/CLAUDE.md }
+              - { src: claude/rules, dest: ${{ runner.temp }}/fake-home/.claude/rules }
+              - { src: claude/commands, dest: ${{ runner.temp }}/fake-home/.claude/commands }
+          repos: []
+          mcp_servers:
+            - name: chimera
+              command: echo chimera-mcp-stub
+          supervisor:
+            auto_install: false
+          spa_build: false
+          install_claude_hooks: true
+          EOF
+
+      - name: run chimera bootstrap
+        env:
+          # Point install-hooks at a tmp file rather than the runner's
+          # real ~/.claude/settings.json (which doesn't exist; would
+          # fail noisily otherwise).
+          CLAUDE_SETTINGS_PATH: ${{ runner.temp }}/fake-home/.claude/settings.json
+        run: |
+          mkdir -p ${{ runner.temp }}/fake-home/.claude
+          uv run chimera bootstrap --profile ${{ runner.temp }}/profile.yaml || true
+          # The `|| true` is because the mcp-register step will fail
+          # without claude CLI on PATH — that's expected on CI. We
+          # assert the specific outcomes below instead of relying on
+          # exit code.
+
+      - name: verify — dotfiles cloned
+        run: |
+          test -d ${{ runner.temp }}/dotfiles-clone/.git \
+            || (echo "::error::dotfiles clone failed"; exit 1)
+          test -f ${{ runner.temp }}/dotfiles-clone/claude/CLAUDE.md \
+            || (echo "::error::dotfiles content missing after clone"; exit 1)
+
+      - name: verify — symlinks created
+        run: |
+          for link in CLAUDE.md rules commands; do
+            dest=${{ runner.temp }}/fake-home/.claude/$link
+            test -L "$dest" || (echo "::error::$dest not a symlink"; ls -la "$dest"; exit 1)
+            test -e "$dest" || (echo "::error::$dest points to nothing"; exit 1)
+          done
+
+      - name: verify — install-hooks wrote python -m form
+        # The bug class we're catching: hook command strings in
+        # settings.json must point at `python -m chimera.hooks.<name>`,
+        # NOT at workspace-rooted paths that don't exist in wheel installs.
+        run: |
+          test -f ${{ runner.temp }}/fake-home/.claude/settings.json \
+            || (echo "::error::settings.json not written"; exit 1)
+          grep -q 'python.*-m chimera.hooks.session_start' \
+            ${{ runner.temp }}/fake-home/.claude/settings.json \
+            || (echo "::error::settings.json doesn't have python -m form"; \
+                cat ${{ runner.temp }}/fake-home/.claude/settings.json; exit 1)
+          # Ensure no leftover legacy path form (regression guard)
+          ! grep -q 'scripts/hooks/.*\.py' ${{ runner.temp }}/fake-home/.claude/settings.json \
+            || (echo "::error::settings.json contains legacy scripts/hooks/ path form"; exit 1)
+
+      - name: verify — re-running bootstrap is idempotent
+        # All op statuses on second run should be `unchanged` or
+        # `skipped`/`updated` (where install-hooks rewrites the same
+        # content). NO `created` or `failed` rows.
+        env:
+          CLAUDE_SETTINGS_PATH: ${{ runner.temp }}/fake-home/.claude/settings.json
+        run: |
+          out=$(uv run chimera bootstrap --profile ${{ runner.temp }}/profile.yaml 2>&1 || true)
+          echo "$out"
+          # Should not produce new `created` results — everything's
+          # already in place from the first run.
+          ! echo "$out" | grep -qE '^\s+✨\s' \
+            || (echo "::error::re-bootstrap produced new 'created' ops (not idempotent)"; exit 1)

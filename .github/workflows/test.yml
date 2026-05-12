@@ -9,22 +9,33 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: pytest (${{ matrix.os }} · py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        # Full history so hatch-vcs can derive a sensible version string.
+        # Otherwise dynamic version resolves to a shallow stub.
+        with:
+          fetch-depth: 0
 
       - name: install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
 
-      - name: setup python
-        run: uv python install 3.13
+      - name: setup python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
 
       - name: sync workspace
-        # `--all-packages` to install every package's dev deps, including
-        # pytest. Single command resolves the lockfile across the workspace.
+        # Plain `uv sync` now installs all members (issue 1 fix: workspace
+        # root lists members as deps). --all-packages stays as a belt-and-
+        # suspenders so we'd notice if that fix regresses.
         run: uv sync --all-packages
 
       - name: pytest
@@ -35,11 +46,34 @@ jobs:
           # the env var here covers any code path that bypasses fixture.
           XDG_STATE_HOME: /tmp/chimera-test-state
 
-      - name: pytest collection only (other packages)
-        # Sanity check that test discovery doesn't error out for the
-        # packages we haven't bootstrapped tests for yet (scarlet,
-        # seance, specter). When those packages add real tests, the
-        # main pytest step picks them up automatically via the
-        # tool.pytest testpaths glob.
-        run: uv run pytest --collect-only -q
-        continue-on-error: true
+      - name: smoke — entry points exist after sync
+        # Issue 1 regression guard: `uv sync` must produce every member's
+        # console-script in .venv/bin/. If a future change drops chimera
+        # from the workspace deps, this catches it before a user hits
+        # "failed to spawn chimera" mid-bootstrap.
+        run: |
+          test -x .venv/bin/chimera || (echo "::error::missing .venv/bin/chimera"; exit 1)
+          test -x .venv/bin/scarlet || (echo "::error::missing .venv/bin/scarlet"; exit 1)
+          test -x .venv/bin/seance || (echo "::error::missing .venv/bin/seance"; exit 1)
+          test -x .venv/bin/specter || (echo "::error::missing .venv/bin/specter"; exit 1)
+          uv run chimera --version
+
+      - name: smoke — hook modules importable as python -m
+        # Issue 3 regression guard: chimera.hooks.* must be importable
+        # AS modules, not just files. install-hooks writes a command of
+        # the form `python -m chimera.hooks.<name>` and Claude Code
+        # spawns that — if the package vanishes (e.g. someone reverts
+        # the chimera.hooks/ move), the hooks silently fail.
+        run: |
+          uv run python -c "import chimera.hooks.session_start, chimera.hooks.user_prompt_submit, chimera.hooks.post_tool_use"
+
+      - name: smoke — install-hooks writes new command form
+        # The hook commands settings.json picks up must point at
+        # `python -m chimera.hooks.<name>`, not at a legacy
+        # scripts/hooks/*.py path. A regression here means end users
+        # who pip install chimera get hooks pointing at nonexistent
+        # files in their site-packages.
+        run: |
+          out=$(uv run chimera install-hooks --dry-run)
+          echo "$out" | grep -q 'python.*-m chimera.hooks.session_start' \
+            || (echo "::error::install-hooks --dry-run didn't emit python -m form"; echo "$out"; exit 1)

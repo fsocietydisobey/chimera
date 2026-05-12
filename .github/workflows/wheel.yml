@@ -1,0 +1,94 @@
+name: wheel-install
+
+# Verifies the "end user installs chimera from a built wheel" path.
+# This is the failure mode that bit hardest during cross-machine
+# bootstrap: chimera as a workspace member sources cleanly, but its
+# wheel doesn't ship workspace-level files (scripts/hooks/), so any
+# code path that resolves data from the workspace root crashes on
+# wheel installs. The fixes:
+#
+#   - hook scripts moved into chimera.hooks subpackage (issue 3)
+#   - install-hooks writes `python -m chimera.hooks.<name>` commands
+#   - hatch-vcs version means each commit's wheel has a unique version
+#
+# This workflow exercises all three by actually building + installing
+# a wheel into a fresh venv and verifying chimera works there.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  wheel:
+    name: wheel install + verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # for hatch-vcs version
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: setup python
+        run: uv python install 3.13
+
+      - name: build chimera wheel
+        # Build only chimera package — workspace siblings have their
+        # own wheels but the end-user-install bug class is chimera-specific.
+        working-directory: packages/chimera
+        run: uv build --wheel --out-dir ${{ runner.temp }}/wheels
+
+      - name: install wheel into fresh venv
+        # NOT the workspace .venv — we want a clean Python that has
+        # never seen chimera as a workspace member, mirroring the
+        # `pip install chimera` user experience exactly.
+        run: |
+          uv venv ${{ runner.temp }}/userenv --python 3.13
+          uv pip install --python ${{ runner.temp }}/userenv/bin/python \
+            ${{ runner.temp }}/wheels/chimera-*.whl
+
+      - name: smoke — chimera CLI works from wheel install
+        run: |
+          ${{ runner.temp }}/userenv/bin/chimera --version
+
+      - name: smoke — hook modules importable from wheel install
+        # If chimera.hooks/* doesn't ship in the wheel, the install-hooks
+        # command Claude Code spawns will ModuleNotFoundError at runtime.
+        # Catch that here instead of in production.
+        run: |
+          ${{ runner.temp }}/userenv/bin/python -c "import chimera.hooks.session_start, chimera.hooks.user_prompt_submit, chimera.hooks.post_tool_use"
+
+      - name: smoke — install-hooks succeeds against wheel-installed chimera
+        # This is the literal failure mode that motivated the issue 3
+        # fix: install-hooks looked up scripts/hooks/ relative to its
+        # __file__, which on a wheel install lands in site-packages
+        # (no scripts/). It must NOW succeed and write the python -m
+        # form into a tmp settings.json.
+        env:
+          CLAUDE_SETTINGS_PATH: ${{ runner.temp }}/settings.json
+        run: |
+          ${{ runner.temp }}/userenv/bin/chimera install-hooks --dry-run > ${{ runner.temp }}/install-out.txt
+          grep -q 'python.*-m chimera.hooks.session_start' ${{ runner.temp }}/install-out.txt \
+            || (echo "::error::wheel install-hooks didn't emit python -m form"; cat ${{ runner.temp }}/install-out.txt; exit 1)
+
+      - name: smoke — wheel version is git-derived, not the static stub
+        # Issue 2 regression guard: if hatch-vcs setup breaks, the
+        # wheel ships with the fallback "0.0.0+unknown" version, which
+        # would defeat itself (uv tool install cache would re-trigger).
+        # A real built version contains digits + commit info.
+        run: |
+          v=$(${{ runner.temp }}/userenv/bin/chimera --version | awk '{print $2}')
+          echo "wheel version: $v"
+          [ "$v" != "0.0.0+unknown" ] || (echo "::error::hatch-vcs not producing a git-derived version"; exit 1)
+          [ "$v" != "0.1.0.dev0" ] || (echo "::error::static version 0.1.0.dev0 surfaced; hatch-vcs likely misconfigured"; exit 1)
