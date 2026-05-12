@@ -1,0 +1,63 @@
+# Example chimera profile — derived from the current laptop's setup.
+# Drop this into your dotfiles repo as `chimera-profile.yaml`, then:
+#
+#   chimera bootstrap --profile https://raw.githubusercontent.com/<you>/dotfiles/main/chimera-profile.yaml
+#
+# Or, after dotfiles are cloned:
+#
+#   chimera bootstrap --profile ~/dotfiles/chimera-profile.yaml
+#
+# Re-run `chimera sync` on any machine to pick up profile changes
+# (new symlinks, new MCP servers, etc.). Idempotent — safe on a cron.
+
+name: fsocietydisobey
+description: |
+  Joseph's portable agent setup. Clones dotfiles + sibling MCP server
+  repos under ~/dev/, symlinks Claude rules/commands, registers all
+  five chimera-ecosystem MCP servers + Linear, installs the supervisor.
+
+dotfiles:
+  repo: git@github.com:fsocietydisobey/dotfiles.git
+  path: ~/dotfiles
+  symlinks:
+    - { src: claude/CLAUDE.md, dest: ~/.claude/CLAUDE.md }
+    - { src: claude/rules,     dest: ~/.claude/rules }
+    - { src: claude/commands,  dest: ~/.claude/commands }
+    # Add cursor symlinks here if/when you sync those too:
+    # - { src: cursor/rules, dest: ~/.cursor/rules }
+
+repos:
+  - name: chimera
+    url: git@github.com:fsocietydisobey/chimera.git
+    install: uv sync
+  - name: seance
+    url: git@github.com:fsocietydisobey/seance.git
+    install: uv sync
+  - name: specter
+    url: git@github.com:fsocietydisobey/specter.git
+    install: uv sync
+  - name: scarlet
+    url: git@github.com:fsocietydisobey/scarlet.git
+    install: uv sync
+  - name: ai-orchestrator
+    url: git@github.com:fsocietydisobey/ai-orchestrator.git
+    install: uv sync
+
+mcp_servers:
+  - name: chimera
+    command: uv --directory ~/dev/chimera run chimera mcp 2>>/tmp/chimera.log
+  - name: seance
+    command: uv --directory ~/dev/seance run seance serve
+  - name: specter
+    command: uv --directory ~/dev/specter run specter serve
+  - name: scarlet
+    command: uv --directory ~/dev/scarlet run scarlet serve
+  - name: ai-orchestrator
+    command: uv --directory ~/dev/ai-orchestrator run ai-orchestrator 2>>/tmp/orchestrator.log
+  - name: linear
+    command: npx -y mcp-remote https://mcp.linear.app/mcp
+
+supervisor:
+  auto_install: true
+
+spa_build: true

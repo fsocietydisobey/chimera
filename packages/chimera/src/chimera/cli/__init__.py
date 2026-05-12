@@ -21,7 +21,18 @@ import sys
 from chimera import __version__
 
 from . import attach as attach_cmd
-from . import dev, doctor, install_hooks, mcp_serve, monitor, observer, route, task, tools as tools_cmd
+from . import bootstrap as bootstrap_cmd
+from . import (
+    dev,
+    doctor,
+    install_hooks,
+    mcp_serve,
+    monitor,
+    observer,
+    route,
+    task,
+    tools as tools_cmd,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -47,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     attach_cmd.add_subparser(subparsers)
     observer.add_subparser(subparsers)
     tools_cmd.add_subparser(subparsers)
+    bootstrap_cmd.add_subparser(subparsers)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
