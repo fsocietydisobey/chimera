@@ -418,20 +418,60 @@ def _capture_stdout(fn, *args, **kwargs) -> tuple[int, str]:
     return rc, buf.getvalue().strip()
 
 
-def install_claude_hooks() -> OpResult:
+def _resolve_scripts_dir(override: str | None) -> Path:
+    """Find the chimera scripts/hooks directory.
+
+    Resolution order:
+      1. Explicit override (bootstrap passes the chimera repo's
+         scripts/hooks based on the profile's `repos:` entry).
+      2. install_hooks's default = parents[5]/scripts/hooks. Works
+         when chimera is running from a source checkout; fails on
+         `uv tool install` where the wheel strips the workspace's
+         scripts/ directory.
+      3. ~/dev/chimera/scripts/hooks — the convention used by the
+         shipped default profile.
+
+    Returns the FIRST existing path. If none exist, returns the
+    default so install-hooks can surface its own clear error.
+    """
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override).expanduser().resolve())
+    try:
+        from chimera.cli.install_hooks import SCRIPTS_DIR as default
+
+        candidates.append(Path(default))
+    except ImportError:
+        pass
+    candidates.append(Path(os.path.expanduser("~/dev/chimera/scripts/hooks")).resolve())
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return candidates[0] if candidates else Path("/dev/null")
+
+
+def install_claude_hooks(*, scripts_dir: str | None = None) -> OpResult:
     """(Re-)write ~/.claude/settings.json with chimera's SessionStart /
     UserPromptSubmit / PostToolUse hooks via direct in-process call.
 
-    Idempotent. Hook commands embed the LOCAL chimera install path
-    (resolved at call-time from this module's __file__), so paths are
-    always correct for THIS machine. That's why settings.json is
-    regenerated per-machine rather than symlinked from dotfiles.
+    Idempotent. Hook commands embed an absolute path to the local
+    chimera install's `scripts/hooks/*.py` so they're always correct
+    for THIS machine. That's why settings.json is regenerated
+    per-machine rather than symlinked from dotfiles.
+
+    Args:
+        scripts_dir: explicit hook scripts directory. Use when the
+            chimera CLI was installed via `uv tool install` (the wheel
+            strips workspace-level `scripts/`); pass the cloned
+            source repo's scripts/hooks. Bootstrap derives this from
+            the profile's chimera repo entry. None falls back to
+            install-hooks's auto-detection (source checkout default,
+            then ~/dev/chimera/scripts/hooks).
     """
     import argparse
 
     try:
         from chimera.cli.install_hooks import (
-            SCRIPTS_DIR,
             SETTINGS_PATH,
             run as run_install_hooks,
         )
@@ -443,10 +483,12 @@ def install_claude_hooks() -> OpResult:
             detail=f"chimera.cli.install_hooks import failed: {e}",
         )
 
+    resolved_scripts = _resolve_scripts_dir(scripts_dir)
+
     args = argparse.Namespace(
         uninstall=False,
         settings_path=str(SETTINGS_PATH),
-        scripts_dir=str(SCRIPTS_DIR),
+        scripts_dir=str(resolved_scripts),
         dry_run=False,
     )
     rc, out = _capture_stdout(run_install_hooks, args)
