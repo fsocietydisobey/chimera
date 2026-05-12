@@ -32,7 +32,9 @@ def test_log_question_targeted(isolated_state):
     sid = "asker"
     # Target doesn't exist as a name yet — should fall back to literal
     q = isolated_state.log_question(
-        sid, "approach a or b?", target_session_id="not-yet-named",
+        sid,
+        "approach a or b?",
+        target_session_id="not-yet-named",
     )
     assert q["target_session_id"] == "not-yet-named"
 
@@ -58,7 +60,9 @@ def test_post_notice_lands_in_inbox(isolated_state):
     isolated_state.log_decision(target, "init", "")
 
     note = isolated_state.post_notice(
-        target, text="FYI thing happened", from_session_id="me",
+        target,
+        text="FYI thing happened",
+        from_session_id="me",
     )
     assert note["kind"] == "notice"
     assert note["read"] is False
@@ -90,7 +94,9 @@ def test_search_archive_substring(isolated_state):
     """search_archive matches body substring case-insensitively."""
     target = "target-3"
     isolated_state.log_decision(target, "init", "")
-    isolated_state.post_notice(target, text="Roboflow concurrency check", from_session_id="me")
+    isolated_state.post_notice(
+        target, text="Roboflow concurrency check", from_session_id="me"
+    )
     isolated_state.post_notice(target, text="something unrelated", from_session_id="me")
     isolated_state.pending_notes(target, mark_read=True)
 
@@ -119,7 +125,10 @@ def test_consume_handoffs_cwd_match_and_child(isolated_state, tmp_path):
     sub.mkdir()
 
     isolated_state.post_handoff(
-        asker, text="hand off", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="hand off",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
 
     # Exact match
@@ -142,7 +151,10 @@ def test_consume_handoffs_unrelated_cwd_no_match(isolated_state, tmp_path):
     other.mkdir()
 
     isolated_state.post_handoff(
-        asker, text="for project-a", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="for project-a",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     matched = isolated_state.consume_handoffs("session", str(other))
     assert matched == []
@@ -196,15 +208,21 @@ def test_list_sessions_cache_invalidated_on_set_name(isolated_state):
 def test_broadcast_returns_immediately_when_no_subscribers(isolated_state, tmp_path):
     """log_decision shouldn't spawn a thread if no subscribers exist."""
     import time
+
     asker = "asker"
     project = tmp_path / "p"
     project.mkdir()
     # Handoff without subscribers
     h = isolated_state.post_handoff(
-        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="t",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     isolated_state.consume_handoffs("owner", str(project))  # claim ownership
-    isolated_state.log_decision("subscriber-1", "init", "")  # materialize but DON'T subscribe
+    isolated_state.log_decision(
+        "subscriber-1", "init", ""
+    )  # materialize but DON'T subscribe
 
     # Time log_decision — should be fast (no broadcast work)
     t0 = time.perf_counter()
@@ -224,7 +242,10 @@ def test_consume_handoffs_auto_claims_first_consumer_as_owner(isolated_state, tm
     project = tmp_path / "p"
     project.mkdir()
     isolated_state.post_handoff(
-        asker, text="test", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="test",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
 
     # First consumer becomes owner
@@ -246,7 +267,10 @@ def test_subscribe_handoff_idempotent(isolated_state, tmp_path):
     project = tmp_path / "p"
     project.mkdir()
     h = isolated_state.post_handoff(
-        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="t",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
 
     isolated_state.subscribe_handoff(h["id"], "observer-session")
@@ -267,7 +291,10 @@ def test_log_decision_broadcasts_to_handoff_subscribers(isolated_state, tmp_path
     project = tmp_path / "p"
     project.mkdir()
     h = isolated_state.post_handoff(
-        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="t",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     # Consume claims owner
     isolated_state.consume_handoffs("owner-session", str(project))
@@ -298,7 +325,10 @@ def test_release_handoff_clears_owner(isolated_state, tmp_path):
     project = tmp_path / "p"
     project.mkdir()
     h = isolated_state.post_handoff(
-        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="t",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     isolated_state.consume_handoffs("session-A", str(project))
     isolated_state.release_handoff(h["id"], "session-A")
@@ -323,7 +353,10 @@ def test_release_handoff_rejects_non_owner(isolated_state, tmp_path):
     project = tmp_path / "p"
     project.mkdir()
     h = isolated_state.post_handoff(
-        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="t",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     isolated_state.consume_handoffs("session-A", str(project))
 
@@ -341,7 +374,10 @@ def test_consume_handoffs_expired_dropped(isolated_state, tmp_path, monkeypatch)
 
     # Negative TTL → expires_at is in the past
     isolated_state.post_handoff(
-        asker, text="stale", scope_cwd=str(project), expires_in_hours=-1.0,
+        asker,
+        text="stale",
+        scope_cwd=str(project),
+        expires_in_hours=-1.0,
     )
     matched = isolated_state.consume_handoffs("session", str(project))
     assert matched == []
@@ -400,7 +436,10 @@ def test_invite_handoff_owner_creates_child(isolated_state, tmp_path):
     project.mkdir()
 
     parent = isolated_state.post_handoff(
-        asker, text="parent work", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="parent work",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     isolated_state.consume_handoffs("owner-A", str(project))  # claims ownership
 
@@ -427,7 +466,10 @@ def test_invite_handoff_non_owner_rejected(isolated_state, tmp_path):
     project = tmp_path / "p"
     project.mkdir()
     parent = isolated_state.post_handoff(
-        asker, text="t", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="t",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     isolated_state.consume_handoffs("owner-A", str(project))
 
@@ -457,7 +499,10 @@ def test_invite_handoff_only_invitee_can_consume(isolated_state, tmp_path):
     project = tmp_path / "p"
     project.mkdir()
     parent = isolated_state.post_handoff(
-        asker, text="parent", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="parent",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     isolated_state.consume_handoffs("owner-A", str(project))
     isolated_state.log_decision("invitee-B", "init", "")
@@ -488,7 +533,10 @@ def test_invite_handoff_posts_inbox_notice(isolated_state, tmp_path):
     project = tmp_path / "p"
     project.mkdir()
     parent = isolated_state.post_handoff(
-        asker, text="parent", scope_cwd=str(project), expires_in_hours=24,
+        asker,
+        text="parent",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     isolated_state.consume_handoffs("owner-A", str(project))
     isolated_state.log_decision("invitee-B", "init", "")
@@ -504,3 +552,113 @@ def test_invite_handoff_posts_inbox_notice(isolated_state, tmp_path):
     invite_notices = [n for n in pending if "INVITE" in (n.get("text") or "")]
     assert len(invite_notices) == 1
     assert "please pick up subtask" in invite_notices[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Workspaces — privacy boundary for multi-session isolation
+# ---------------------------------------------------------------------------
+
+
+def test_set_workspace_persists_and_is_round_trip(isolated_state):
+    """set_workspace writes the workspace field; get_workspace reads it."""
+    sid = "ws-test"
+    isolated_state.log_decision(sid, "init", "")
+    rec = isolated_state.set_workspace(sid, "client-a")
+    assert rec["workspace"] == "client-a"
+    assert isolated_state.get_workspace(sid) == "client-a"
+
+
+def test_get_workspace_defaults_for_unset(isolated_state):
+    """Sessions without a workspace field resolve to DEFAULT_WORKSPACE."""
+    sid = "no-ws-yet"
+    isolated_state.log_decision(sid, "init", "")
+    # No set_workspace called → must default
+    assert isolated_state.get_workspace(sid) == isolated_state.DEFAULT_WORKSPACE
+
+
+def test_set_workspace_validates_name(isolated_state):
+    """Invalid workspace names raise ValueError (path-injection guard)."""
+    sid = "ws-test"
+    isolated_state.log_decision(sid, "init", "")
+    for bad in ("Has Spaces", "UPPER", "../etc", "x" * 41, ""):
+        with pytest.raises(ValueError, match="workspace"):
+            isolated_state.set_workspace(sid, bad)
+
+
+def test_log_question_rejects_cross_workspace_by_default(isolated_state):
+    """Targeted questions across workspace boundaries fail without flag."""
+    isolated_state.log_decision("asker", "init", "")
+    isolated_state.log_decision("target", "init", "")
+    isolated_state.set_workspace("asker", "client-a")
+    isolated_state.set_workspace("target", "client-b")
+
+    with pytest.raises(ValueError, match="crosses workspaces"):
+        isolated_state.log_question("asker", "are you up?", target_session_id="target")
+
+
+def test_log_question_allows_cross_workspace_with_flag(isolated_state):
+    """cross_workspace=True overrides the workspace guard."""
+    isolated_state.log_decision("asker", "init", "")
+    isolated_state.log_decision("target", "init", "")
+    isolated_state.set_workspace("asker", "client-a")
+    isolated_state.set_workspace("target", "client-b")
+
+    q = isolated_state.log_question(
+        "asker",
+        "are you up?",
+        target_session_id="target",
+        cross_workspace=True,
+    )
+    assert q["target_session_id"] == "target"
+
+
+def test_list_sessions_workspace_filter(isolated_state):
+    """list_sessions(workspace='X') returns only sessions in workspace X."""
+    isolated_state.log_decision("s1", "init", "")
+    isolated_state.log_decision("s2", "init", "")
+    isolated_state.log_decision("s3", "init", "")
+    isolated_state.set_workspace("s1", "alpha")
+    isolated_state.set_workspace("s2", "alpha")
+    # s3 stays default
+
+    alpha = isolated_state.list_sessions(use_cache=False, workspace="alpha")
+    assert {r["session_id"] for r in alpha} == {"s1", "s2"}
+
+    default_only = isolated_state.list_sessions(use_cache=False, workspace="default")
+    assert {r["session_id"] for r in default_only} == {"s3"}
+
+    # None / "*" return all
+    everything = isolated_state.list_sessions(use_cache=False, workspace=None)
+    assert {r["session_id"] for r in everything} == {"s1", "s2", "s3"}
+    star = isolated_state.list_sessions(use_cache=False, workspace="*")
+    assert {r["session_id"] for r in star} == {"s1", "s2", "s3"}
+
+
+def test_state_workspace_mismatch_raises(isolated_state):
+    """state(id, workspace='X') raises when target is in a different workspace."""
+    isolated_state.log_decision("target", "decided X", "")
+    isolated_state.set_workspace("target", "client-a")
+
+    with pytest.raises(ValueError, match="workspace"):
+        isolated_state.state("target", workspace="client-b")
+
+    # No workspace arg → no filter, no raise
+    s = isolated_state.state("target")
+    assert s["session_id"] == "target"
+
+
+def test_recent_decisions_workspace_filter(isolated_state):
+    """recent_decisions(workspace='X') only returns decisions from X."""
+    isolated_state.log_decision("s1", "d1", "")
+    isolated_state.log_decision("s2", "d2", "")
+    isolated_state.set_workspace("s1", "alpha")
+    # s2 stays default
+
+    alpha_only = isolated_state.recent_decisions(workspace="alpha")
+    assert {d["session_id"] for d in alpha_only} == {"s1"}
+
+    default_only = isolated_state.recent_decisions(workspace="default")
+    assert {d["session_id"] for d in default_only} == {"s2"}
+
+    everything = isolated_state.recent_decisions(workspace=None)
+    assert {d["session_id"] for d in everything} == {"s1", "s2"}

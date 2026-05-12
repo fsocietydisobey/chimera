@@ -1730,6 +1730,7 @@ async def session_log_question(
     session_id: str,
     text: str,
     target_session_id: str | None = None,
+    cross_workspace: bool = False,
 ) -> str:
     """Open a question for parallel sessions to answer.
 
@@ -1769,11 +1770,15 @@ async def session_log_question(
         text: the question. Be specific — vague questions get vague answers.
         target_session_id: optional — UUID or name of the session this
             question is directed at. None = broadcast.
+        cross_workspace: by default, targeted questions across workspace
+            boundaries are rejected. Pass True to override when you
+            intentionally want to reach a sister project's session.
     """
     return await _monitor_tools.session_log_question(
         session_id,
         text,
         target_session_id=target_session_id,
+        cross_workspace=cross_workspace,
     )
 
 
@@ -2134,6 +2139,33 @@ async def session_set_name(session_id: str, name: str) -> str:
         name: friendly slug.
     """
     return await _monitor_tools.session_set_name(session_id, name)
+
+
+@mcp.tool()
+@logged_tool("session_set_workspace")
+async def session_set_workspace(session_id: str, workspace: str) -> str:
+    """Place this session in a named workspace (privacy/noise boundary).
+
+    Workspaces group sessions that share visibility. By default every
+    session lives in workspace `"default"` and all sessions can see each
+    other. Setting a workspace partitions read access:
+
+      - `session_list(workspace="X")` → only X's sessions
+      - `session_state(id, workspace="X")` → 404 if id is in another workspace
+      - `session_log_question(target_session_id=...)` → rejects cross-
+        workspace targets unless `cross_workspace=True` is set
+
+    Use when: running multi-client work, separating personal/work
+    sessions, or quieting `session_list` noise across many projects.
+
+    Workspace names must match `^[a-z0-9][a-z0-9-]{{0,39}}$`
+    (kebab-case, max 40 chars).
+
+    Args:
+        session_id: this session's id (set your OWN workspace, not someone else's).
+        workspace: target workspace name. Use `"default"` to opt back out.
+    """
+    return await _monitor_tools.session_set_workspace(session_id, workspace)
 
 
 @mcp.tool()

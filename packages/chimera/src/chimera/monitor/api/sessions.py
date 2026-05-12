@@ -38,6 +38,7 @@ class TouchReq(BaseModel):
 class QuestionReq(BaseModel):
     text: str
     target_session_id: str | None = None
+    cross_workspace: bool = False
 
 
 class StatusReq(BaseModel):
@@ -47,6 +48,10 @@ class StatusReq(BaseModel):
 
 class NameReq(BaseModel):
     name: str
+
+
+class WorkspaceReq(BaseModel):
+    workspace: str
 
 
 class AnswerReq(BaseModel):
@@ -91,20 +96,28 @@ def build_router():
     router = fastapi.APIRouter()
 
     @router.get("/sessions")
-    async def list_all() -> dict:
-        return {"sessions": sessions.list_sessions()}
+    async def list_all(workspace: str | None = None) -> dict:
+        return {"sessions": sessions.list_sessions(workspace=workspace)}
 
     @router.get("/sessions/recent_decisions")
-    async def recent_decisions(recent_per_session: int = 5) -> dict:
-        return {"decisions": sessions.recent_decisions(recent_per_session=recent_per_session)}
+    async def recent_decisions(
+        recent_per_session: int = 5, workspace: str | None = None
+    ) -> dict:
+        return {
+            "decisions": sessions.recent_decisions(
+                recent_per_session=recent_per_session, workspace=workspace
+            )
+        }
 
     @router.get("/sessions/{session_id}")
-    async def get_state(session_id: str, recent: int = 10) -> dict:
+    async def get_state(
+        session_id: str, recent: int = 10, workspace: str | None = None
+    ) -> dict:
         try:
-            return sessions.state(session_id, recent=recent)
+            return sessions.state(session_id, recent=recent, workspace=workspace)
         except ValueError as e:
-            # Unknown session name/id — clean 404 with helpful message
-            # rather than a 500 stack trace.
+            # Unknown session name/id (or workspace mismatch) — clean 404
+            # with helpful message rather than a 500 stack trace.
             raise fastapi.HTTPException(404, str(e))
 
     @router.get("/sessions/{session_id}/summary")
@@ -136,11 +149,17 @@ def build_router():
 
     @router.post("/sessions/{session_id}/question")
     async def post_question(session_id: str, req: QuestionReq) -> dict:
-        return sessions.log_question(
-            session_id,
-            req.text,
-            target_session_id=req.target_session_id,
-        )
+        try:
+            return sessions.log_question(
+                session_id,
+                req.text,
+                target_session_id=req.target_session_id,
+                cross_workspace=req.cross_workspace,
+            )
+        except ValueError as e:
+            # Workspace mismatch → 422 (validation), distinct from 404
+            # (unknown session) and 410 (gone).
+            raise fastapi.HTTPException(422, str(e))
 
     @router.get("/sessions/{session_id}/incoming")
     async def get_incoming(session_id: str) -> dict:
@@ -187,6 +206,21 @@ def build_router():
     @router.post("/sessions/{session_id}/name")
     async def post_name(session_id: str, req: NameReq) -> dict:
         return sessions.set_name(session_id, req.name)
+
+    @router.post("/sessions/{session_id}/workspace")
+    async def post_workspace(session_id: str, req: WorkspaceReq) -> dict:
+        try:
+            return sessions.set_workspace(session_id, req.workspace)
+        except ValueError as e:
+            # Invalid workspace name (kebab-case validator) → 422.
+            raise fastapi.HTTPException(422, str(e))
+
+    @router.get("/sessions/{session_id}/workspace")
+    async def get_workspace_endpoint(session_id: str) -> dict:
+        return {
+            "session_id": session_id,
+            "workspace": sessions.get_workspace(session_id),
+        }
 
     @router.get("/sessions/resolve/{query}")
     async def resolve(query: str) -> dict:
@@ -272,7 +306,9 @@ def build_router():
         """
         try:
             return sessions.route_message(
-                req.target, req.text, from_session_id=req.from_session_id,
+                req.target,
+                req.text,
+                from_session_id=req.from_session_id,
             )
         except ValueError as e:
             raise fastapi.HTTPException(404, str(e))
@@ -344,7 +380,8 @@ def build_router():
         a specific topic.
         """
         return sessions.query_transcript(
-            session_id, q,
+            session_id,
+            q,
             context_lines=context_lines,
             max_matches=max_matches,
         )

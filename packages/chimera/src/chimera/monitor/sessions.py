@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -44,9 +45,11 @@ from chimera.monitor import desktop_notify
 
 log = get_logger("monitor.sessions")
 
-_BASE_DIR = Path(
-    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
-) / "chimera" / "sessions"
+_BASE_DIR = (
+    Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")))
+    / "chimera"
+    / "sessions"
+)
 
 
 def _session_dir(session_id: str) -> Path:
@@ -80,6 +83,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -134,6 +138,8 @@ def log_question(
     session_id: str,
     text: str,
     target_session_id: str | None = None,
+    *,
+    cross_workspace: bool = False,
 ) -> dict:
     """Open a question that another session can answer.
 
@@ -148,6 +154,12 @@ def log_question(
 
     If `target_session_id` is None, the question is "broadcast" — visible
     only to sessions that explicitly inspect session_state(this_session).
+
+    **Workspace guard:** when targeting a specific session, asker's and
+    target's workspaces must match (both default to `"default"` if unset).
+    To cross workspace boundaries explicitly, pass `cross_workspace=True`.
+    Raises ValueError on mismatch without the flag — protects the
+    multi-client / personal-vs-work isolation use case.
     """
     resolved_target: str | None = None
     if target_session_id:
@@ -160,11 +172,24 @@ def log_question(
             # to log.
             resolved_target = target_session_id
 
+        # Workspace check happens AFTER resolve so a name lookup still works.
+        # Only run when both sides are resolvable; if target doesn't exist
+        # yet we can't know its workspace, so we trust the asker (the same
+        # leniency resolve_session_id grants for not-yet-materialized names).
+        if not cross_workspace:
+            asker_ws = get_workspace(session_id)
+            target_ws = get_workspace(resolved_target)
+            if asker_ws != target_ws:
+                raise ValueError(
+                    f"Targeted question crosses workspaces: asker={asker_ws!r}, "
+                    f"target={target_ws!r}. Pass cross_workspace=True to bypass."
+                )
+
     record = {
         "ts": _now_iso(),
         "id": uuid.uuid4().hex[:12],
         "text": text,
-        "status": "open",      # "open" | "answered" | "withdrawn"
+        "status": "open",  # "open" | "answered" | "withdrawn"
         "answer": None,
         "answered_by": None,
         "answered_at": None,
@@ -173,7 +198,10 @@ def log_question(
     _append_jsonl(_session_dir(session_id) / "questions.jsonl", record)
     log.info(
         "session %s: question opened (id=%s, target=%s) — %s",
-        session_id, record["id"], resolved_target or "broadcast", text[:80],
+        session_id,
+        record["id"],
+        resolved_target or "broadcast",
+        text[:80],
     )
     return record
 
@@ -225,6 +253,67 @@ def set_name(session_id: str, name: str) -> dict:
     _invalidate_list_sessions_cache()
     log.info("session %s: named %r", session_id, name)
     return record
+
+
+_WORKSPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DEFAULT_WORKSPACE = "default"
+
+
+def set_workspace(session_id: str, workspace: str) -> dict:
+    """Place the session in a named workspace — privacy/noise boundary for
+    multi-project session isolation.
+
+    Workspaces group sessions that share visibility. By default every
+    session is in workspace `"default"`. Cross-workspace operations
+    (reading another workspace's state, posting targeted questions
+    across workspaces) require explicit `workspace=...` overrides or
+    `cross_workspace=True` flags.
+
+    Names must be kebab-case (`^[a-z0-9][a-z0-9-]{0,39}$`) to prevent
+    path-injection / shell-quoting surprises and keep them URL-safe.
+
+    Backward-compatible: existing sessions without a workspace field
+    are treated as `"default"` everywhere they're read.
+    """
+    if not _WORKSPACE_RE.match(workspace):
+        raise ValueError(
+            f"workspace {workspace!r} invalid — must match "
+            f"^[a-z0-9][a-z0-9-]{{0,39}}$ (kebab-case, max 40 chars)."
+        )
+    path = _session_dir(session_id) / "status.json"
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    record = {**existing, "workspace": workspace, "updated_at": _now_iso()}
+    record.setdefault("status", "idle")
+    record.setdefault("detail", "")
+    path.write_text(json.dumps(record, indent=2))
+    _invalidate_list_sessions_cache()
+    log.info("session %s: workspace=%r", session_id, workspace)
+    return record
+
+
+def get_workspace(session_id: str) -> str:
+    """Return the session's workspace, defaulting to `"default"` if unset.
+
+    Used internally by read paths to filter visibility. Never raises;
+    a missing or malformed status.json returns DEFAULT_WORKSPACE so
+    we don't accidentally hide sessions whose status file is truncated.
+    """
+    path = _session_dir(session_id) / "status.json"
+    if not path.exists():
+        return DEFAULT_WORKSPACE
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_WORKSPACE
+    ws = data.get("workspace")
+    if not isinstance(ws, str) or not ws:
+        return DEFAULT_WORKSPACE
+    return ws
 
 
 def resolve_session_id(query: str) -> str:
@@ -344,7 +433,9 @@ def post_answer(
     )
     log.info(
         "session %s: answer posted by %s for q=%s",
-        target_session_id, from_session_id, question_id,
+        target_session_id,
+        from_session_id,
+        question_id,
     )
     return matched
 
@@ -354,13 +445,26 @@ def post_answer(
 # ---------------------------------------------------------------------------
 
 
-def state(session_id: str, recent: int = 10) -> dict:
+def state(session_id: str, recent: int = 10, *, workspace: str | None = None) -> dict:
     """Full digest of session_id's externalized state. The 'what is session A
     up to right now' query.
 
     Accepts either a session UUID OR a friendly name (set via set_name).
+
+    Workspace gate (opt-in, backward-compatible): pass `workspace="X"`
+    to assert the target session is in workspace X. Mismatch raises
+    ValueError (mapped to 404 at the API layer). Passing None or "*"
+    skips the check entirely — preserves prior behavior.
     """
     session_id = resolve_session_id(session_id)
+    if workspace not in (None, "*"):
+        target_ws = get_workspace(session_id)
+        if target_ws != workspace:
+            raise ValueError(
+                f"No session named or id'd {session_id!r} in workspace "
+                f"{workspace!r} (target is in {target_ws!r}). Pass "
+                f"workspace='*' or omit to read cross-workspace."
+            )
     d = _session_dir(session_id)
     decisions = _read_jsonl(d / "decisions.jsonl")
     files = _read_jsonl(d / "files_touched.jsonl")
@@ -376,7 +480,9 @@ def state(session_id: str, recent: int = 10) -> dict:
         "recent_files": files[-recent:],
         "file_touch_count": len(files),
         "open_questions": [q for q in questions if q.get("status") == "open"],
-        "answered_questions": [q for q in questions if q.get("status") == "answered"][-recent:],
+        "answered_questions": [q for q in questions if q.get("status") == "answered"][
+            -recent:
+        ],
     }
 
 
@@ -420,14 +526,29 @@ def summary(session_id: str) -> dict:
     }
 
 
-def recent_decisions(across_sessions: bool = True, recent_per_session: int = 5) -> list[dict]:
-    """Recent decisions across all sessions (or just the active ones)."""
+def recent_decisions(
+    across_sessions: bool = True,
+    recent_per_session: int = 5,
+    *,
+    workspace: str | None = None,
+) -> list[dict]:
+    """Recent decisions across all sessions (or just the active ones).
+
+    Workspace filter (opt-in): pass `workspace="X"` to scope to one
+    workspace. None / "*" returns everything (backward-compatible).
+    """
     if not _BASE_DIR.exists():
         return []
     out: list[dict] = []
     for sd in _BASE_DIR.iterdir():
         if not sd.is_dir():
             continue
+        if workspace not in (None, "*"):
+            # Per-session lookup is cheap (single status.json read); we
+            # do it before reading decisions.jsonl so we skip the more
+            # expensive scan on mismatched sessions.
+            if get_workspace(sd.name) != workspace:
+                continue
         decisions = _read_jsonl(sd / "decisions.jsonl")[-recent_per_session:]
         for d in decisions:
             d["session_id"] = sd.name
@@ -535,9 +656,9 @@ def _extract_text_from_message(msg: Any) -> str:
             tname = msg.get("name", "?")
             args = msg.get("input", {})
             if isinstance(args, dict):
-                arg_summary = ", ".join(
-                    f"{k}={str(v)[:60]}" for k, v in args.items()
-                )[:300]
+                arg_summary = ", ".join(f"{k}={str(v)[:60]}" for k, v in args.items())[
+                    :300
+                ]
             else:
                 arg_summary = str(args)[:300]
             return f"[tool_use {tname}({arg_summary})]"
@@ -614,18 +735,27 @@ def query_transcript(
         excerpt_turns = []
         for j in range(start, end):
             t = turns[j]
-            excerpt_turns.append({
-                "line_no": t["_line_no"],
-                "type": t.get("type") or "?",
-                "role": (t.get("message") or {}).get("role") if isinstance(t.get("message"), dict) else None,
-                "is_match": j == idx,
-                "text_preview": t["_text"][:500] + ("…" if len(t["_text"]) > 500 else ""),
-            })
-        matches.append({
-            "match_at_turn": idx,
-            "match_at_line": turn["_line_no"],
-            "excerpt": excerpt_turns,
-        })
+            excerpt_turns.append(
+                {
+                    "line_no": t["_line_no"],
+                    "type": t.get("type") or "?",
+                    "role": (
+                        (t.get("message") or {}).get("role")
+                        if isinstance(t.get("message"), dict)
+                        else None
+                    ),
+                    "is_match": j == idx,
+                    "text_preview": t["_text"][:500]
+                    + ("…" if len(t["_text"]) > 500 else ""),
+                }
+            )
+        matches.append(
+            {
+                "match_at_turn": idx,
+                "match_at_line": turn["_line_no"],
+                "excerpt": excerpt_turns,
+            }
+        )
         if len(matches) >= max_matches:
             break
 
@@ -704,7 +834,11 @@ def summarize_transcript(
                                 for v in args.values():
                                     if isinstance(v, str) and "/" in v and len(v) < 300:
                                         # Heuristic: looks like a file path
-                                        if v.startswith("/") or v.startswith("./") or "." in v.rsplit("/", 1)[-1]:
+                                        if (
+                                            v.startswith("/")
+                                            or v.startswith("./")
+                                            or "." in v.rsplit("/", 1)[-1]
+                                        ):
                                             file_paths.add(v)
                         if part.get("type") == "text" and role == "assistant":
                             text = part.get("text", "").strip()
@@ -799,7 +933,8 @@ def route_message(
     project_cwd = _resolve_project_label_to_cwd(target)
     if project_cwd:
         handoff = post_handoff(
-            from_session_id, text,
+            from_session_id,
+            text,
             scope_cwd=project_cwd,
         )
         return {
@@ -887,7 +1022,9 @@ def post_handoff(
     desktop_notify.notify_handoff(from_session_id, inferred, text)
     log.info(
         "handoff posted by %s for cwd=%s — %s",
-        from_session_id, inferred, text[:80],
+        from_session_id,
+        inferred,
+        text[:80],
     )
     return handoff
 
@@ -1164,7 +1301,9 @@ def _broadcast_to_handoff_subscribers(
         handoffs_snapshot = _read_jsonl(_HANDOFFS_PATH)
     except OSError:
         return
-    owned = [h for h in handoffs_snapshot if h.get("owner_session_id") == owner_session_id]
+    owned = [
+        h for h in handoffs_snapshot if h.get("owner_session_id") == owner_session_id
+    ]
     if not owned:
         return
 
@@ -1172,7 +1311,7 @@ def _broadcast_to_handoff_subscribers(
     # (which might race with concurrent writes).
     work: list[tuple[str, str, dict]] = []
     for h in owned:
-        for sub_id in (h.get("subscribers") or []):
+        for sub_id in h.get("subscribers") or []:
             note = {
                 "id": uuid.uuid4().hex[:12],
                 "ts": _now_iso(),
@@ -1197,13 +1336,12 @@ def _broadcast_to_handoff_subscribers(
             # high-volume so the env var defaults OFF. Opt in via
             # CHIMERA_DESKTOP_NOTIFY_BROADCAST=1.
             try:
-                desktop_notify.notify_broadcast(
-                    owner_session_id, sub_id, kind, text
-                )
+                desktop_notify.notify_broadcast(owner_session_id, sub_id, kind, text)
             except Exception:
                 pass
 
     import threading
+
     threading.Thread(target=_do_fanout, daemon=True).start()
 
 
@@ -1306,7 +1444,9 @@ def consume_handoffs(session_id: str, cwd: str) -> list[dict]:
                     f.write(json.dumps(h, separators=(",", ":")) + "\n")
             tmp.replace(_HANDOFFS_PATH)
         except OSError:
-            log.warning("failed to rewrite handoffs.jsonl; read state may double-surface")
+            log.warning(
+                "failed to rewrite handoffs.jsonl; read state may double-surface"
+            )
 
     return matched
 
@@ -1354,7 +1494,10 @@ def post_notice(
         desktop_notify.notify_notice(target_session_id, from_session_id, text)
     log.info(
         "session %s: notice posted by %s (id=%s) — %s",
-        target_session_id, from_session_id, note["id"], text[:80],
+        target_session_id,
+        from_session_id,
+        note["id"],
+        text[:80],
     )
     return note
 
@@ -1505,10 +1648,12 @@ def search_archive(
 
     if query:
         q = query.lower()
+
         def _matches(n: dict) -> bool:
             body = (n.get("answer") or n.get("text") or "").lower()
             qtext = (n.get("question_text") or "").lower()
             return q in body or q in qtext
+
         archived = [n for n in archived if _matches(n)]
 
     archived.sort(key=lambda n: n.get("ts", ""), reverse=True)
@@ -1602,10 +1747,12 @@ def incoming_questions(session_id: str) -> list[dict]:
                 continue
             if q.get("target_session_id") != session_id:
                 continue
-            out.append({
-                **q,
-                "from_session_id": sd.name,
-            })
+            out.append(
+                {
+                    **q,
+                    "from_session_id": sd.name,
+                }
+            )
     out.sort(key=lambda q: q.get("ts", ""), reverse=True)
     return out
 
@@ -1623,21 +1770,33 @@ _list_sessions_cache: tuple[float, list[dict]] | None = None
 _list_sessions_lock = None  # lazy init to avoid threading import on cold path
 
 
-def list_sessions(use_cache: bool = True) -> list[dict]:
+def list_sessions(use_cache: bool = True, workspace: str | None = None) -> list[dict]:
     """All sessions with their last-modified timestamp + summary counts.
 
     Cached for 2s. Pass use_cache=False to force a fresh scan (rare —
     most callers prefer the cache because sessions don't move fast).
+
+    Workspace filter (opt-in, backward-compatible):
+      - workspace=None (default): return ALL sessions, regardless of
+        workspace. Preserves prior behavior — existing callers see no
+        change.
+      - workspace="*": same as None — explicit "I want everything".
+      - workspace="<name>": only sessions in that workspace. Sessions
+        without an explicit workspace field are treated as `"default"`,
+        so workspace="default" includes legacy / unmigrated sessions.
     """
     global _list_sessions_cache, _list_sessions_lock
 
+    rows: list[dict]
     if use_cache and _list_sessions_cache is not None:
         cached_at, cached_data = _list_sessions_cache
         if time.time() - cached_at < _LIST_SESSIONS_TTL:
-            return cached_data
+            rows = cached_data
+            return _filter_sessions_by_workspace(rows, workspace)
 
     if _list_sessions_lock is None:
         import threading
+
         _list_sessions_lock = threading.Lock()
 
     with _list_sessions_lock:
@@ -1646,7 +1805,7 @@ def list_sessions(use_cache: bool = True) -> list[dict]:
         if use_cache and _list_sessions_cache is not None:
             cached_at, cached_data = _list_sessions_cache
             if time.time() - cached_at < _LIST_SESSIONS_TTL:
-                return cached_data
+                return _filter_sessions_by_workspace(cached_data, workspace)
 
         if not _BASE_DIR.exists():
             _list_sessions_cache = (time.time(), [])
@@ -1660,26 +1819,63 @@ def list_sessions(use_cache: bool = True) -> list[dict]:
                 (p.stat().st_mtime for p in sd.iterdir() if p.is_file()),
                 default=0.0,
             )
-            decisions = sum(1 for _ in (sd / "decisions.jsonl").open() if _.strip()) if (sd / "decisions.jsonl").exists() else 0
-            files = sum(1 for _ in (sd / "files_touched.jsonl").open() if _.strip()) if (sd / "files_touched.jsonl").exists() else 0
+            decisions = (
+                sum(1 for _ in (sd / "decisions.jsonl").open() if _.strip())
+                if (sd / "decisions.jsonl").exists()
+                else 0
+            )
+            files = (
+                sum(1 for _ in (sd / "files_touched.jsonl").open() if _.strip())
+                if (sd / "files_touched.jsonl").exists()
+                else 0
+            )
             questions = _read_jsonl(sd / "questions.jsonl")
             open_q = sum(1 for q in questions if q.get("status") == "open")
             status_path = sd / "status.json"
-            status = json.loads(status_path.read_text()) if status_path.exists() else None
+            status = (
+                json.loads(status_path.read_text()) if status_path.exists() else None
+            )
 
-            out.append({
-                "session_id": sd.name,
-                "name": (status.get("name") if isinstance(status, dict) else None),
-                "last_active": last_mtime,
-                "last_active_age_s": time.time() - last_mtime if last_mtime else None,
-                "status": status,
-                "decision_count": decisions,
-                "file_touch_count": files,
-                "open_question_count": open_q,
-            })
+            # Resolve workspace from status.json once + surface in the row
+            # so cached lookups don't need to re-stat status.json.
+            ws_value = DEFAULT_WORKSPACE
+            if isinstance(status, dict):
+                raw = status.get("workspace")
+                if isinstance(raw, str) and raw:
+                    ws_value = raw
+
+            out.append(
+                {
+                    "session_id": sd.name,
+                    "name": (status.get("name") if isinstance(status, dict) else None),
+                    "workspace": ws_value,
+                    "last_active": last_mtime,
+                    "last_active_age_s": (
+                        time.time() - last_mtime if last_mtime else None
+                    ),
+                    "status": status,
+                    "decision_count": decisions,
+                    "file_touch_count": files,
+                    "open_question_count": open_q,
+                }
+            )
         out.sort(key=lambda r: r.get("last_active", 0), reverse=True)
         _list_sessions_cache = (time.time(), out)
-        return out
+        return _filter_sessions_by_workspace(out, workspace)
+
+
+def _filter_sessions_by_workspace(
+    rows: list[dict], workspace: str | None
+) -> list[dict]:
+    """Apply workspace filter to a list_sessions result.
+
+    None or "*" returns the full list (no filter). A concrete name
+    returns only matching rows; rows without a workspace field are
+    treated as DEFAULT_WORKSPACE so legacy data isn't silently hidden.
+    """
+    if workspace in (None, "*"):
+        return rows
+    return [r for r in rows if (r.get("workspace") or DEFAULT_WORKSPACE) == workspace]
 
 
 def _invalidate_list_sessions_cache() -> None:

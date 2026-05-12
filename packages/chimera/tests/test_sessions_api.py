@@ -187,7 +187,10 @@ def test_invite_handoff_happy_path(api_client, isolated_state, tmp_path):
     project = tmp_path / "proj"
     project.mkdir()
     parent = isolated_state.post_handoff(
-        "asker", text="parent", scope_cwd=str(project), expires_in_hours=24,
+        "asker",
+        text="parent",
+        scope_cwd=str(project),
+        expires_in_hours=24,
     )
     isolated_state.consume_handoffs("owner-A", str(project))
     isolated_state.log_decision("invitee-B", "init", "")
@@ -218,3 +221,63 @@ def test_invite_handoff_unknown_parent_returns_404(api_client):
     )
     assert r.status_code == 404
     assert "no handoff" in r.json()["detail"].lower()
+
+
+def test_post_workspace_returns_200(api_client, isolated_state):
+    """POST /workspace updates the field; GET returns it."""
+    isolated_state.log_decision("ws-sess", "init", "")
+    r = api_client.post(
+        "/api/sessions/ws-sess/workspace",
+        json={"workspace": "client-a"},
+    )
+    assert r.status_code == 200
+    assert r.json()["workspace"] == "client-a"
+
+    r2 = api_client.get("/api/sessions/ws-sess/workspace")
+    assert r2.status_code == 200
+    assert r2.json() == {"session_id": "ws-sess", "workspace": "client-a"}
+
+
+def test_post_workspace_invalid_name_returns_422(api_client, isolated_state):
+    """Bad workspace names → 422 (validation), not 500."""
+    isolated_state.log_decision("ws-sess", "init", "")
+    r = api_client.post(
+        "/api/sessions/ws-sess/workspace",
+        json={"workspace": "Has Spaces"},
+    )
+    assert r.status_code == 422
+    assert "workspace" in r.json()["detail"].lower()
+
+
+def test_state_workspace_mismatch_returns_404(api_client, isolated_state):
+    """Cross-workspace state read without override → 404."""
+    isolated_state.log_decision("target", "init", "")
+    isolated_state.set_workspace("target", "client-a")
+    r = api_client.get("/api/sessions/target?workspace=client-b")
+    assert r.status_code == 404
+
+
+def test_question_cross_workspace_returns_422(api_client, isolated_state):
+    """Targeted question across workspaces without flag → 422."""
+    isolated_state.log_decision("asker", "init", "")
+    isolated_state.log_decision("target", "init", "")
+    isolated_state.set_workspace("asker", "client-a")
+    isolated_state.set_workspace("target", "client-b")
+
+    r = api_client.post(
+        "/api/sessions/asker/question",
+        json={"text": "ping?", "target_session_id": "target"},
+    )
+    assert r.status_code == 422
+    assert "workspace" in r.json()["detail"].lower()
+
+    # With cross_workspace flag → success
+    r2 = api_client.post(
+        "/api/sessions/asker/question",
+        json={
+            "text": "ping?",
+            "target_session_id": "target",
+            "cross_workspace": True,
+        },
+    )
+    assert r2.status_code == 200

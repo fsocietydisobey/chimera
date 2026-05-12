@@ -1,9 +1,8 @@
 # Workspaces — multi-session scoping
 
-> **Status:** Spec'd, not started. Queued behind: nothing critical.
-> Build when: user runs ≥3 unrelated projects in parallel and read-side
-> cross-visibility starts feeling noisy, OR when a privacy boundary is
-> needed (client-A vs client-B isolation, security-sensitive sessions).
+> **Status:** Shipped (MVP). Opt-in workspace filter on read paths +
+> cross_workspace guard on targeted questions. CLI commands (move /
+> list-by-workspace) deferred to v2 per spec.
 
 ## Problem
 

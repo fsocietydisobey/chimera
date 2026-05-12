@@ -836,6 +836,7 @@ async def session_log_question(
     session_id: str,
     text: str,
     target_session_id: str | None = None,
+    cross_workspace: bool = False,
 ) -> str:
     """Open a question other sessions can answer. Returns the question id —
     that's the handle other sessions use in `session_post_answer`.
@@ -850,10 +851,17 @@ async def session_log_question(
     only to sessions that explicitly read this session's session_state.
     Use targeted questions for direct asks; broadcast for "anyone with
     context can chime in."
+
+    Workspace guard: targeted questions across workspaces are rejected
+    by default (HTTP 422). Pass `cross_workspace=True` to explicitly
+    allow — used when you intentionally want to reach a sister project's
+    session.
     """
     body: dict[str, Any] = {"text": text}
     if target_session_id:
         body["target_session_id"] = target_session_id
+    if cross_workspace:
+        body["cross_workspace"] = True
     data = _post(
         f"/api/sessions/{urllib.parse.quote(session_id)}/question",
         body,
@@ -1226,6 +1234,25 @@ async def session_set_name(session_id: str, name: str) -> str:
     if isinstance(data, str):
         return data
     return f"🏷️ session named `{name}` (id: {session_id})"
+
+
+async def session_set_workspace(session_id: str, workspace: str) -> str:
+    """Place this session in a named workspace (privacy/noise boundary).
+
+    Sessions in the same workspace see each other normally; cross-
+    workspace reads and targeted writes require explicit overrides
+    (`workspace=` arg on reads, `cross_workspace=True` on
+    `session_log_question`). Default workspace is `"default"` so
+    pre-existing sessions are unaffected.
+    """
+    data = _post(
+        f"/api/sessions/{urllib.parse.quote(session_id)}/workspace",
+        {"workspace": workspace},
+        timeout=10.0,
+    )
+    if isinstance(data, str):
+        return data
+    return f"🗂️ session workspace set to `{workspace}` (id: {session_id})"
 
 
 async def session_post_answer(
