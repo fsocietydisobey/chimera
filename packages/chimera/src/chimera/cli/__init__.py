@@ -25,6 +25,7 @@ from . import bootstrap as bootstrap_cmd
 from . import (
     dev,
     doctor,
+    heal,
     install_hooks,
     mcp_serve,
     monitor,
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     observer.add_subparser(subparsers)
     tools_cmd.add_subparser(subparsers)
     bootstrap_cmd.add_subparser(subparsers)
+    heal.add_subparser(subparsers)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
