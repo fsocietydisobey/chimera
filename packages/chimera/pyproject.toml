@@ -1,6 +1,11 @@
 [project]
 name = "chimera"
-version = "0.1.0.dev0"
+# Version is derived from git via hatch-vcs at build time. Each commit
+# produces a unique PEP 440 dev version like 0.1.0.dev42+gc22b2db,
+# which defeats uv tool install's wheel cache (keyed by name+version)
+# and lets dev contributors `uv tool install --force` actually pick up
+# new code. Tagged releases produce clean versions (e.g. 0.2.0).
+dynamic = ["version"]
 description = "Multi-model AI orchestration — patterns, runtime, dispatcher"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,8 +49,21 @@ all = []
 chimera = "chimera.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# Pull the version from git. Read from the workspace root's git history
+# (root-path = "../..") so the version reflects the repo's HEAD across
+# all workspace members, not each member's last touch.
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = "../..", search_parent_directories = true }
+
+# Write the resolved version to chimera/_version.py at build time so
+# chimera/__init__.py can do `from chimera._version import __version__`
+# without re-running hatch-vcs every import. The file is gitignored.
+[tool.hatch.build.hooks.vcs]
+version-file = "src/chimera/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chimera"]

@@ -58,3 +58,8 @@ apps/*/build/
 .env.local
 .env.*.local
 !.env.example
+
+# hatch-vcs generated version files — written at build time, regenerated
+# from git on each install. Never commit; would defeat the dynamic version.
+packages/*/src/*/_version.py
+shared/*/src/*/_version.py
