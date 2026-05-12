@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from chimera.log import get_logger
+from chimera.bootstrap import checks
 from chimera.bootstrap import operations as ops
 from chimera.bootstrap.schema import Profile
 
@@ -175,5 +176,89 @@ def run_sync(profile: Profile, *, force: bool = False) -> RunReport:
     # new hook modules.
     if profile.install_claude_hooks:
         report.results.append(ops.install_claude_hooks())
+
+    return report
+
+
+def check_bootstrap(profile: Profile) -> RunReport:
+    """Read-only drift report: what would `run_bootstrap` do right now?
+
+    Mirrors run_bootstrap's order but uses the no-side-effect checks
+    in chimera.bootstrap.checks. Status semantics:
+      - `unchanged` → already in desired state
+      - `created` / `updated` → would-create / would-update on apply
+      - `skipped` → can't be checked here (e.g. install command,
+        claude CLI missing) — defers judgment to apply time
+      - `failed` → drift can't be resolved without intervention
+        (e.g. non-git dir blocking a clone path)
+
+    No daemon dependency: every check is local fs / settings.json
+    inspection. Cheap to run in a tight loop (e.g. `chimera doctor`).
+    """
+    report = RunReport()
+
+    # --- 1. dotfiles + symlinks ---
+    dotfiles_root: Path | None = None
+    if profile.dotfiles:
+        r = checks.check_dotfiles(profile.dotfiles)
+        report.results.append(r)
+        candidate = Path(os.path.expanduser(profile.dotfiles.path)).resolve()
+        if candidate.is_dir():
+            dotfiles_root = candidate
+            for entry in profile.dotfiles.symlinks:
+                report.results.append(checks.check_symlink(entry, dotfiles_root))
+        else:
+            # Can't check symlinks against a non-existent dotfiles dir;
+            # the clone itself is the gating drift.
+            for entry in profile.dotfiles.symlinks:
+                report.results.append(
+                    ops.OpResult(
+                        op="symlink",
+                        target=entry.dest,
+                        status="skipped",
+                        detail="can't check until dotfiles is cloned",
+                    )
+                )
+
+    # --- 2. repos ---
+    for spec in profile.repos:
+        report.results.append(checks.check_repo(spec))
+        # Skip install check (uv sync is itself idempotent, no cheap
+        # way to dry-check whether anything would change).
+        report.results.append(
+            ops.OpResult(
+                op="install",
+                target=spec.name,
+                status="skipped",
+                detail="install commands not dry-checkable; defers to apply time",
+            )
+        )
+
+    # --- 3. MCP servers ---
+    for mcp in profile.mcp_servers:
+        report.results.append(checks.check_mcp(mcp))
+
+    # --- 4. Claude Code hooks ---
+    if profile.install_claude_hooks:
+        report.results.append(checks.check_claude_hooks())
+
+    # --- 5. supervisor ---
+    if profile.supervisor.auto_install:
+        report.results.append(checks.check_supervisor())
+
+    # --- 6. SPA build ---
+    if profile.spa_build:
+        root = _chimera_repo_root()
+        if root is None:
+            report.results.append(
+                ops.OpResult(
+                    op="spa-build",
+                    target="monitor-ui",
+                    status="skipped",
+                    detail="running from installed wheel — SPA ships pre-built",
+                )
+            )
+        else:
+            report.results.append(checks.check_spa(root))
 
     return report
