@@ -1,19 +1,36 @@
 # Cross-machine khimaira backend
 
-**Status**: scope-corrected 2026-05-13 — see banner below
-**Phase**: NORTH_STAR Phase 1.5 (3-5 days for the MVP task-dispatch primitive)
-**Owner**: TBD
+**Status**: ⚠️ SUPERSEDED — see banner below
+**Phase**: replaced by `tasks/linear-surfacing-hook/IMPLEMENTATION.md`
+**Owner**: n/a (closed)
 **Last reviewed**: 2026-05-13
 
-> **🎯 Primary goal: cross-machine TASK DISPATCH, not full state
-> replication.** The user wants to assign a piece of work to another
-> machine (with the context bundle the work needs) and have that
-> machine pull it on its next SessionStart. Most of this doc was
-> originally written for the broader state-replication problem; the
-> MVP is much narrower. See "Phase 1.5a — Task dispatch MVP" below
-> for what actually ships. Full state replication (the rest of this
-> doc) is deferred to **Phase 1.5b**, gated on the MVP proving
-> demand for it.
+> **⚠️ This entire doc is SUPERSEDED as of 2026-05-13.** Joseph
+> already has the Linear MCP server wired up for task tracking.
+> Building khimaira's own task-dispatch primitive is parallel-system
+> syndrome. **Use Linear for task assignment.** The only remaining
+> UX gap — "auto-surface assigned items on session boot instead of
+> requiring me to query Linear manually" — gets a much smaller fix:
+> a Linear-surfacing hook in SessionStart. See
+> `tasks/linear-surfacing-hook/IMPLEMENTATION.md` for the new
+> Phase 1.5 scope (~1-2 days total).
+>
+> **What's killed**:
+> - ~~Full state replication (9-10 days, Phase 1.5b in the spike)~~
+> - ~~Cross-machine task-dispatch primitive (3-5 days, Phase 1.5a in
+>   the 2026-05-13 reframe)~~ — handoffs.jsonl schema extension,
+>   `khimaira assign` / `khimaira pull` CLI, context-bundle resolver,
+>   pull+claim endpoints. None of this gets built.
+>
+> **What's left to ship**:
+> - Linear-surfacing hook in SessionStart (~1 day) — see linked spec
+> - Optionally aggregated `khimaira usage savings` across machines
+>   (~half day) — useful but not gating
+>
+> **The rest of this doc** (architecture options, state-surface
+> inventory, latency math) is kept for reference in case the question
+> of "real cross-machine state" ever resurfaces. It is NOT
+> implementation guidance for Phase 1.5.
 
 ## Why
 

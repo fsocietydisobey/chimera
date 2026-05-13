@@ -157,107 +157,66 @@ once heuristic is calibrated.
 **Done when**: After a week of real traffic, we have data on leakage
 rate and mis-route rate. Decision on v2 is informed by data, not vibes.
 
-### Phase 1.5 — Cross-machine task dispatch  (3-5 days)
+### Phase 1.5 — Linear-surfacing hook  (1-2 days)
 
-> **Scope-corrected 2026-05-13.** Original spike + my first scope-lock
-> assumed full state replication (9-10 days). Joseph clarified the
-> actual use case: he wants to assign a piece of work to another
-> machine with the context bundle attached. That's a much smaller
-> build. Full state replication is deferred to Phase 1.5b, only if
-> the MVP proves demand for it.
-> See spike: `tasks/cross-machine-backend/IMPLEMENTATION.md`.
+> **Scope-corrected 2026-05-13 (third reframe in one day).** Original
+> spike: full state replication (9-10d). First reframe: cross-machine
+> task dispatch (3-5d). **Final answer: just surface Linear issues in
+> SessionStart (~1d).** Joseph already uses Linear MCP for task
+> tracking — building khimaira's own task-dispatch system is
+> parallel-system syndrome. Linear stays canonical for tasks;
+> khimaira only needs to close the auto-surface UX gap.
+> See spec: `tasks/linear-surfacing-hook/IMPLEMENTATION.md`.
 
-**The use case** (real, as of 2026-05-13): Joseph runs khimaira on
-desktop + laptop. He's working on the desktop, realizes "the laptop
-has the Postgres replica already loaded — run the integration suite
-there." Today: SSH in, open Claude Code, paste prompt, wait, copy
-back. Phase 1.5 closes the loop:
+**The use case**: Joseph assigns himself an issue in Linear (or
+someone else assigns it to him). Today he has to *remember* to query
+Linear from a Claude Code session; he'd rather it land automatically
+when he boots, alongside khimaira handoffs.
 
-```bash
-# On the desktop:
-khimaira assign laptop "Run integration suite, report results" \
-  --ref tests/integration/test_dispatch.py \
-  --ref tests/integration/test_runners.py
-
-# On the laptop, on next SessionStart:
-# 📦 khimaira tasks assigned to this machine (1):
-#   Task: Run integration suite, report results
-#   Context: [tests/integration/test_dispatch.py + 1 more, bundled inline]
-# → agent picks it up, runs the work, posts a notice back.
+```
+📋 Linear issues assigned to you (3, cached 2m ago):
+  • KHI-12 (in progress) — "Add per-project budget for mcp__khimaira__auto"
+  • KHI-15 (todo)        — "Investigate Claude Agent SDK"
+  • LL-7  (in review)    — "Wire pricing into checkout flow"
 ```
 
-**Phase 1.5a — task dispatch MVP** (3-5 days):
+**Implementation** (1d for the core, 0.5d for the optional savings
+aggregation — see spec for details):
 
-The insight: a handoff with `assignee` + `context_refs` IS a task.
-Khimaira already has handoffs.jsonl + `attached.json` (project label
-registry) + the SessionStart hook that surfaces matching handoffs.
-The MVP wires the missing parts.
+1. Thin Linear MCP client wrapper with 5-min file cache at
+   `~/.local/state/khimaira/linear-cache.json`.
+2. Extend `session_start.py` to fetch + render Linear issues inline.
+3. Optional `/linear` slash command that bypasses the cache.
+4. Tests: happy path, empty list, Linear unreachable, cache hit,
+   stale-cache-plus-unreachable.
 
-1. **Schema extension** (1d) — `handoffs.jsonl` records gain optional
-   `assignee` (project label), `context_refs` (tagged-union list:
-   file / commit / url / inline), `pulled_by` / `pulled_at`.
-   Backward-compat: old records load with defaults.
+Decisions baked in (per spec):
+- Filter: `assignee=me + status≠done`. Not cwd-scoped (cross-project
+  assignments are common and shouldn't get hidden).
+- Render: inline in SessionStart (matches handoff pattern).
+- Cache: 5 min, file-based, bypassed by `/linear`.
+- Linear unreachable → silent skip, log warning. Don't break boot.
 
-2. **Context-ref resolver** (1d, same day) — sender resolves file refs
-   into bundled payload at post time (receiver may not have the same
-   working tree). Size cap (~1MB) with clear error.
+**Done when**: A fresh Claude Code SessionStart shows assigned Linear
+issues alongside handoffs. Cache hit <50ms; cache miss + Linear
+reachable <500ms; cache miss + Linear unreachable <100ms (skip).
 
-3. **Pull + claim endpoints** (1d) —
-   `GET /api/handoffs/pending?assignee=<label>` for the receiver to
-   discover, `POST /api/handoffs/{id}/claim` for atomic FCFS-claim
-   when multiple sessions could pick it up.
+**Optional add-on**: aggregated `khimaira usage savings --across-machines`
+(~0.5d). Fetch usage.jsonl from configured remote khimaira instances
+via SSH; sum the spend. Skip unless Joseph asks — today's per-machine
+view is sufficient for the savings value-prop.
 
-4. **CLI** (1d, same day) — `khimaira assign <label> "<task>"
-   --ref <files...>` on the sender, `khimaira pull` on the receiver
-   (auto-runs in SessionStart, also available explicitly).
+**What was killed**: full state replication AND cross-machine
+task-dispatch. The handoffs schema extension, `khimaira assign` CLI,
+context-bundle resolver, pull+claim endpoints — none of it gets
+built. `tasks/cross-machine-backend/IMPLEMENTATION.md` is kept as a
+superseded reference doc.
 
-5. **SessionStart hook extension** (1d) — pull `assignee=<this-label>`
-   handoffs alongside cwd-scoped ones. Render the context bundle
-   inline so the agent can act without further fetches.
-
-6. **Tests + smoke** (1-2d) — unit + integration. End-to-end smoke:
-   desktop assigns to laptop, laptop pulls and runs, sender sees a
-   result notice.
-
-Decisions baked in:
-- **Assignee = project label** (not machine identifier, not username).
-  Already exists in `attached.json`; machine-stable across reinstalls;
-  trivially extends to multi-user with namespacing (`alice/proj`).
-- **Context refs are tagged-union** (file / commit / url / inline) —
-  file kind bundles contents at post time so receiver doesn't need
-  the same working tree.
-- **Claim race resolution: FCFS at the daemon level.** Two machines
-  with the same label race; whoever POSTs `/claim` first wins.
-- **No machine identity required.** Daemon doesn't need to know which
-  host is asking — labels are the routing primitive.
-
-**Done when (1.5a)**: `khimaira assign laptop "<task>" --ref <files>`
-from the desktop surfaces on the laptop's next SessionStart with the
-context bundle inline. Laptop's agent picks it up, runs it, posts a
-result notice back. Auto-claim prevents duplicate execution when the
-laptop has multiple sessions in the same project.
-
-**Open questions for the implementer** (not blockers — sane defaults
-documented in the spike):
-- Context-bundle size cap policy (hard limit vs. extension allowlist)
-- Result reporting shape (free-form notice vs. structured `result`
-  field on the handoff record — v2 makes it structured)
-- Per-handoff TTL override for "do this in the next hour or skip" semantics
-
-**Phase 1.5b — Full state replication** (deferred indefinitely, only
-if the MVP shows demand):
-
-The original 9-10 day spike — `StateClient` abstraction, consolidated
-read endpoint, write-queue, `KHIMAIRA_BACKEND_URL` plumbing,
-Postgres-backed shared store. Keeps `tasks/cross-machine-backend/IMPLEMENTATION.md`
-content alive in case it becomes the right answer later. Trigger to
-revisit: real evidence that cross-machine session state (not just
-task dispatch) is daily-use friction.
-
-**Strategic position**: Phase 1.5 is now small enough that it doesn't
-fight Phase 2 (cross-editor) for sequencing. Either can ship first.
-Default order keeps 1.5 before 2 because task dispatch is Joseph's
-daily-use need *today*; cross-editor is the launch-story need *later*.
+**Strategic position**: Phase 1.5 is now small enough (1-2 days)
+that it doesn't fight Phase 2 (cross-editor) for sequencing at all.
+Either can ship first. The original "Phase 1.5 vs Phase 2" debate
+was based on the much-larger task-dispatch scope; with 1.5 collapsed,
+the question is moot.
 
 ### Phase 2 — Cross-editor adapter configs  (1-2 weeks)
 
