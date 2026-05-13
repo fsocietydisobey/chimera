@@ -97,7 +97,7 @@ def test_happy_path_writes_one_record(hook_module, tmp_path, monkeypatch):
     ])
     _feed_stdin(monkeypatch, {
         "session_id": "parent-session-1",
-        "transcript_path": str(transcript),
+        "agent_transcript_path": str(transcript),
         "cwd": "/tmp",
         "hook_event_name": "SubagentStop",
         "subagent_type": "khimaira-factual",
@@ -132,7 +132,7 @@ def test_non_khimaira_subagent_writes_nothing(hook_module, tmp_path, monkeypatch
     ])
     _feed_stdin(monkeypatch, {
         "session_id": "parent-session-2",
-        "transcript_path": str(transcript),
+        "agent_transcript_path": str(transcript),
         "subagent_type": "Explore",  # built-in, not khimaira-*
     })
 
@@ -145,7 +145,7 @@ def test_missing_transcript_does_not_crash(hook_module, tmp_path, monkeypatch):
     mod, state_root = hook_module
     _feed_stdin(monkeypatch, {
         "session_id": "parent-session-3",
-        "transcript_path": str(tmp_path / "does-not-exist.jsonl"),
+        "agent_transcript_path": str(tmp_path / "does-not-exist.jsonl"),
         "subagent_type": "khimaira-factual",
     })
 
@@ -178,7 +178,7 @@ def test_transcript_with_no_assistant_turn_writes_nothing(hook_module, tmp_path,
     _make_transcript(transcript, [_user_line()])
     _feed_stdin(monkeypatch, {
         "session_id": "parent",
-        "transcript_path": str(transcript),
+        "agent_transcript_path": str(transcript),
         "subagent_type": "khimaira-research",
     })
 
@@ -223,7 +223,7 @@ def test_round_trip_to_usage_record(hook_module, tmp_path, monkeypatch):
     ])
     _feed_stdin(monkeypatch, {
         "session_id": "parent",
-        "transcript_path": str(transcript),
+        "agent_transcript_path": str(transcript),
         "subagent_type": "khimaira-deep-debug",
     })
 
@@ -240,6 +240,70 @@ def test_round_trip_to_usage_record(hook_module, tmp_path, monkeypatch):
     assert rec.output_tokens == 2000
 
 
+def test_agent_transcript_path_wins_over_transcript_path(hook_module, tmp_path, monkeypatch):
+    """Regression — 2026-05-13 live verification revealed Claude Code's
+    SubagentStop payload contains BOTH `transcript_path` (the PARENT
+    session's transcript — millions of tokens) AND `agent_transcript_path`
+    (the subagent's small transcript). The hook must read the latter,
+    or the recorded usage matches the parent session and produces
+    absurd costs (e.g. $421 for a one-sentence Haiku answer).
+    """
+    mod, state_root = hook_module
+    # The "parent" transcript: large, on Opus (what we'd record by mistake)
+    parent_transcript = tmp_path / "parent.jsonl"
+    _make_transcript(parent_transcript, [
+        _user_line(),
+        _assistant_line("claude-opus-4-7", input_tokens=10_000_000,
+                        output_tokens=100_000),
+    ])
+    # The "subagent" transcript: small, on Haiku (what we want)
+    agent_transcript = tmp_path / "agent.jsonl"
+    _make_transcript(agent_transcript, [
+        _user_line(),
+        _assistant_line("claude-haiku-4-5-20251001", input_tokens=20,
+                        output_tokens=50),
+    ])
+    # Payload has BOTH fields, matching what Claude Code actually sends
+    _feed_stdin(monkeypatch, {
+        "session_id": "parent",
+        "transcript_path": str(parent_transcript),
+        "agent_transcript_path": str(agent_transcript),
+        "subagent_type": "khimaira-factual",
+    })
+
+    assert mod.main() == 0
+    rows = _read_usage_rows(state_root)
+    assert len(rows) == 1
+    # If the hook reads the wrong field, model would be opus and tokens
+    # would be ~10M. If it reads the right field, model is haiku and
+    # tokens are 70 total.
+    assert rows[0]["model"] == "claude-haiku-4-5-20251001"
+    assert rows[0]["input_tokens"] == 20
+    assert rows[0]["output_tokens"] == 50
+
+
+def test_falls_back_to_transcript_path_when_agent_path_absent(hook_module, tmp_path, monkeypatch):
+    """If a future / older Claude Code version sends only `transcript_path`
+    (no `agent_transcript_path`), fall back to it. Defensive — better to
+    record approximate data than nothing."""
+    mod, state_root = hook_module
+    transcript = tmp_path / "agent.jsonl"
+    _make_transcript(transcript, [
+        _user_line(),
+        _assistant_line("claude-haiku-4-5", input_tokens=10, output_tokens=20),
+    ])
+    _feed_stdin(monkeypatch, {
+        "session_id": "parent",
+        "transcript_path": str(transcript),  # only this field
+        "subagent_type": "khimaira-factual",
+    })
+
+    assert mod.main() == 0
+    rows = _read_usage_rows(state_root)
+    assert len(rows) == 1
+    assert rows[0]["input_tokens"] == 10
+
+
 def test_subagent_type_field_alias(hook_module, tmp_path, monkeypatch):
     """Per Claude Code docs, the payload uses `subagent_type`; older docs
     mentioned `agent_type`. Hook accepts either as a defensive measure."""
@@ -251,7 +315,7 @@ def test_subagent_type_field_alias(hook_module, tmp_path, monkeypatch):
     ])
     _feed_stdin(monkeypatch, {
         "session_id": "parent",
-        "transcript_path": str(transcript),
+        "agent_transcript_path": str(transcript),
         "agent_type": "khimaira-code-fast",  # alias-only path
     })
 

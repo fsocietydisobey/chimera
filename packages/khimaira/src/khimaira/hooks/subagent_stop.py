@@ -6,13 +6,26 @@ Claude Code's subagent system swaps the model per the agent's frontmatter
 delegate path — so `khimaira usage savings` can't see them unless we hook
 the SubagentStop event and write a UsageRecord ourselves.
 
-Payload contract (from Claude Code's hooks docs):
-  - session_id, transcript_path, cwd, hook_event_name
-  - agent_type / subagent_type (the subagent's `name:` field)
-  - agent_id
+Payload contract (empirically captured 2026-05-13 via a probe hook —
+docs were misleading about which transcript path to read):
+  - session_id: parent session UUID
+  - transcript_path: PARENT session's transcript (huge — millions of
+    tokens for a long session). NOT what we want.
+  - agent_transcript_path: SUBAGENT's transcript JSONL. This is the
+    file we parse for the dispatch's usage.
+  - cwd, hook_event_name, permission_mode, stop_hook_active
+  - agent_id, agent_type (the subagent's `name:` field)
+  - subagent_type (alias for agent_type in newer Claude Code versions)
+  - last_assistant_message: final text returned by the subagent
 
-Token counts are NOT in the payload — we read them from the transcript
-JSONL. Format empirically confirmed against 2026-05-13 sessions:
+The fallback to `transcript_path` exists only as a defensive measure
+for older Claude Code versions that may not yet ship the dedicated
+`agent_transcript_path` field. On any Claude Code where both are
+present, `agent_transcript_path` wins.
+
+Token counts are NOT in the payload — we read them from the subagent
+transcript JSONL. Format empirically confirmed against 2026-05-13
+sessions:
   - one line per turn
   - line.type == "assistant" → line.message.{model, usage}
   - line.message.usage.{input_tokens, output_tokens,
@@ -143,7 +156,15 @@ def main() -> int:
         # billed against the parent session normally; not our lane.
         return 0
 
-    transcript_path_str = data.get("transcript_path") or ""
+    # Prefer the dedicated subagent-transcript field over the parent's
+    # transcript_path. See module docstring for the empirical payload
+    # capture that motivated this.
+    transcript_path_str = (
+        data.get("agent_transcript_path")
+        or data.get("subagent_transcript_path")
+        or data.get("transcript_path")
+        or ""
+    )
     if not isinstance(transcript_path_str, str) or not transcript_path_str:
         return 0
     transcript_path = Path(transcript_path_str)
