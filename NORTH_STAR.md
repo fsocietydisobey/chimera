@@ -139,7 +139,9 @@ model. Real thinking-token interception inside Claude Code.
 
 **Done when (1.2b)**: Opus delegates a trivial prompt to a haiku-backed
 subagent automatically, and the savings command shows the dispatch as
-a `mode="subagent"` row.
+a `mode="subagent"` row. ✅ (verified 2026-05-13 — one khimaira-factual
+dispatch produced a haiku record showing 94.7% savings vs the Opus
+baseline.)
 
 **Deferred to 1.2c (after first-set usage data exists)**: khimaira-grep,
 khimaira-code-deep, khimaira-architect, khimaira-debug (as distinct
