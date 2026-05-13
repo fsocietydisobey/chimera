@@ -161,6 +161,45 @@ class ClaudeRunner:
             raw=raw,
         )
 
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        timeout: int | None = None,
+        cwd: str | None = None,
+        session_id: str | None = None,
+        **kwargs: object,
+    ):
+        """Stream the response as a sequence of StreamChunks.
+
+        Current implementation: scaffolded via `default_stream_via_run` —
+        runs `claude` in non-streaming mode and yields one final chunk.
+        This satisfies the Protocol so callers code against `stream()`
+        and the foundation is in place; a future change can swap in
+        real `--output-format stream-json` parsing without touching
+        the call sites.
+
+        Why scaffolded for now: Claude Code's stream-json format is
+        well-defined (Anthropic Messages API streaming events
+        newline-delimited) but the parser is enough work that it
+        deserves its own focused task. Tracked at the same NORTH_STAR
+        Phase 4 stretch where the rest of the streaming-related work
+        lives.
+        """
+        from .base import default_stream_via_run
+
+        async for chunk in default_stream_via_run(
+            self,
+            prompt,
+            model=model,
+            timeout=timeout,
+            cwd=cwd,
+            session_id=session_id,
+            **kwargs,
+        ):
+            yield chunk
+
 
 # Module-level singleton for convenience
 claude_runner = ClaudeRunner()

@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -62,6 +63,31 @@ class RunnerResult:
     raw: str = ""         # raw stdout (when runner emits structured JSON, this is the unparsed payload)
 
 
+@dataclass(frozen=True)
+class StreamChunk:
+    """One chunk emitted by `CLIRunner.stream()`.
+
+    A stream is a sequence of these. Most chunks are incremental text
+    deltas (`text` field, `is_final=False`); the LAST chunk has
+    `is_final=True` and may carry the final `usage` / `model` /
+    `session_id` metadata that's only known at the end.
+
+    Runners that can't actually stream (no `--output-format stream-json`
+    equivalent) implement `stream()` as a degenerate one-chunk iterator
+    that yields a single final chunk — same data shape as `run()`'s
+    return value. Callers code against `stream()` and don't need to
+    distinguish runners that support real streaming from those that don't.
+    """
+
+    text: str = ""                  # incremental text delta (or full text on final-only)
+    is_final: bool = False           # True on the LAST chunk
+    model: str = ""                  # populated on final chunk
+    input_tokens: int = 0            # populated on final chunk
+    output_tokens: int = 0           # populated on final chunk
+    session_id: str | None = None    # populated on final chunk
+    raw: str = ""                    # raw stream line (final chunk: full raw response)
+
+
 class CLIRunner(Protocol):
     """Every concrete runner implements this interface."""
 
@@ -90,6 +116,55 @@ class CLIRunner(Protocol):
         bundle without each runner having to filter.
         """
         ...
+
+    def stream(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        timeout: int | None = None,
+        cwd: str | None = None,
+        session_id: str | None = None,
+        **kwargs: object,
+    ) -> "AsyncIterator[StreamChunk]":
+        """Execute the prompt as a stream of `StreamChunk`s.
+
+        Yields one or more chunks. The LAST chunk has `is_final=True`
+        and carries the final usage / model / session_id metadata.
+
+        Runners that wrap a CLI without native streaming implement this
+        as a degenerate one-chunk iterator (see `default_stream_via_run`
+        below) — the protocol is uniform; the user-visible difference is
+        just latency-to-first-chunk.
+        """
+        ...
+
+
+async def default_stream_via_run(
+    runner: CLIRunner,
+    prompt: str,
+    **kwargs: object,
+) -> "AsyncIterator[StreamChunk]":
+    """Default `stream()` implementation for runners without a native
+    streaming mode. Calls the runner's `run()` and yields one final
+    chunk with the full text + metadata.
+
+    Usage from a concrete runner:
+
+        async def stream(self, prompt, **kwargs):
+            async for chunk in default_stream_via_run(self, prompt, **kwargs):
+                yield chunk
+    """
+    result = await runner.run(prompt, **kwargs)  # type: ignore[arg-type]
+    yield StreamChunk(
+        text=result.text,
+        is_final=True,
+        model=result.model,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        session_id=result.session_id,
+        raw=result.raw,
+    )
 
 
 def cli_available(cmd: str) -> bool:

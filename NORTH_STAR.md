@@ -376,15 +376,27 @@ the open-source launch. Most are 1-2 hour items that pile up if ignored.
 Features that would be nice but aren't on a phase yet. Track here so
 they don't get lost.
 
-- **No per-project model budget enforcement.** `--budget` flag exists
-  on `khimaira task` but not on `mcp__khimaira__auto`. Should surface.
-- **No streaming for delegate responses.** Today the user waits for the
-  whole answer; should stream when the underlying runner supports it.
-- **No multi-turn conversation through `mcp__khimaira__auto`.** Each
-  call is one-shot. Multi-turn would need session state on khimaira's
-  side, which we have infrastructure for but haven't wired in.
-- **No automatic model registry refresh.** When Anthropic / Google /
-  OpenAI release new models, the user has to manually update
+- ~~**No per-project model budget enforcement.**~~ ✅ shipped 2026-05-13
+  (#60 — `mcp__khimaira__auto` + `delegate` accept `project` +
+  `budget_usd` kwargs; pre-dispatch gate refuses when accumulated
+  30-day spend exceeds the cap).
+- **Streaming for delegate responses — SCAFFOLD shipped, real
+  per-chunk streaming deferred** (#55 partial, 2026-05-13). The
+  `CLIRunner.stream()` Protocol + `StreamChunk` dataclass +
+  `default_stream_via_run` helper are in place; ClaudeRunner.stream()
+  currently degenerates to one final chunk (no real streaming). Real
+  `--output-format stream-json` parsing for the Claude runner is a
+  follow-up task — the call-site contract is set so the
+  implementation can drop in without touching consumers.
+- ~~**No multi-turn conversation through `mcp__khimaira__auto`.**~~
+  ✅ shipped 2026-05-13 (#56 — `continue_task_id` kwarg on `auto()` +
+  `delegate()` threads successive calls into one conversation via
+  `~/.local/state/khimaira/conversations/<id>.jsonl`).
+- ~~**No automatic model registry refresh.**~~ ✅ shipped 2026-05-13
+  (#57 — `khimaira models sync` diffs user registry against shipped
+  defaults; `--apply` writes the merged set with backup, preserving
+  user-only entries). When Anthropic / Google / OpenAI release new
+  models, the user has to manually update
   `~/.khimaira/models.yaml`. A `khimaira models sync` command pulling
   from a curated upstream registry would help.
 - **No prompt-caching awareness.** Anthropic offers prompt caching
