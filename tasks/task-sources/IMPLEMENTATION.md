@@ -1,6 +1,6 @@
 # External task source integration — Phase 1.5
 
-**Status**: MVP shipped 2026-05-13 (Protocol + JSONL adapter + SessionStart integration + tests). Linear / GitHub adapters are follow-up work pending daemon-side MCP dispatch.
+**Status**: shipped 2026-05-13 — Protocol + JSONL adapter + **GitHub `gh` adapter** + SessionStart integration + 22 tests. Linear adapter is follow-up work pending daemon-side MCP dispatch.
 **Phase**: NORTH_STAR Phase 1.5
 
 ## Goal
@@ -133,12 +133,17 @@ Requires daemon-side MCP dispatch — the SessionStart hook can't call
 Cost: ~1 day for the daemon endpoint + adapter; per-source adapter
 work on top of that.
 
-### GitHub Issues adapter
+### ~~GitHub Issues adapter~~ ✅ shipped
 
-Two paths: shell-out to `gh issue list --assignee @me` (hook-safe!) or
-via a future GitHub MCP. The `gh`-CLI path can ship as a sibling
-adapter in this package, hook-safe like JSONL. Reasonable next
-addition if community demand exists.
+`GithubTaskSource` lives at `packages/khimaira/src/khimaira/task_sources/github.py`.
+Shells out to `gh issue list --assignee @me --state open --json ...`.
+Hook-safe (no MCP / network dependency from the daemon perspective —
+gh handles auth). Setup: `gh auth login` once, then add
+`{kind: github, enabled: true}` to `~/.khimaira/task_sources.yaml`.
+
+Failure modes all handled silently — gh not installed, not authed,
+times out, returns garbage → return [], log warning, never break the
+SessionStart hook.
 
 ### `/tasks` slash command
 

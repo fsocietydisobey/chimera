@@ -35,6 +35,7 @@ import yaml
 from khimaira.log import get_logger
 
 from . import Task, TaskSource
+from .github import GithubTaskSource
 from .jsonl import JsonlTaskSource
 
 log = get_logger("task_sources.config")
@@ -57,9 +58,15 @@ def _build_source(entry: dict[str, Any]) -> TaskSource | None:
         path_raw = entry.get("path")
         path = Path(os.path.expanduser(str(path_raw))) if path_raw else None
         return JsonlTaskSource(path=path)
+    if kind == "github":
+        return GithubTaskSource(
+            limit=int(entry.get("limit", 30) or 30),
+            cmd=str(entry.get("cmd", "gh") or "gh"),
+            timeout_s=float(entry.get("timeout_s", 10.0) or 10.0),
+        )
     log.warning(
         "task_sources: unknown kind %r in config — ignoring entry %r. "
-        "Built-in kinds: jsonl. See tasks/task-sources/IMPLEMENTATION.md "
+        "Built-in kinds: jsonl, github. See tasks/task-sources/IMPLEMENTATION.md "
         "for the adapter contract if you want to add one.",
         kind,
         entry,
