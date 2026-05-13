@@ -385,6 +385,7 @@ async def delegate(
     timeout_s: int = 120,
     project: str = "",
     budget_usd: float | None = None,
+    continue_task_id: str = "",
 ) -> str:
     """**Lower-token-cost answer.** Delegate a prompt to the cheapest
     competent model and return its answer text.
@@ -421,6 +422,14 @@ async def delegate(
             exceeds the cap, the dispatch is refused without running.
             Loose gate — one in-flight call can overshoot — but stops
             the next call cold.
+        continue_task_id: optional conversation id. If set, khimaira
+            loads the prior turns for this id from
+            ~/.local/state/khimaira/conversations/<id>.jsonl, prepends
+            them to your prompt, and appends this turn after dispatch.
+            The first call to start a conversation can pass any id —
+            subsequent calls passing the same id thread into the same
+            conversation. Pick an id stable across the agent's idea of
+            "the same conversation" (e.g. "<cwd>/<feature-name>").
     """
     return await _delegate_impl(
         prompt,
@@ -428,6 +437,7 @@ async def delegate(
         timeout_s=timeout_s,
         project=project,
         budget_usd=budget_usd,
+        continue_task_id=continue_task_id,
     )
 
 
@@ -438,6 +448,7 @@ async def auto(
     timeout_s: int = 120,
     project: str = "",
     budget_usd: float | None = None,
+    continue_task_id: str = "",
 ) -> str:
     """**Auto-routed answer.** Same as `delegate(tier="auto")` — picks the
     cheapest competent model from your enabled-for-auto pool, runs the
@@ -463,6 +474,10 @@ async def auto(
             attributed per-project. Required if `budget_usd` is set.
         budget_usd: optional per-project rolling-30-day budget cap in
             USD. Refuses the dispatch if already met or exceeded.
+        continue_task_id: optional conversation id for multi-turn
+            dispatch. Same id across calls = same conversation
+            (history loaded + new turn appended). Empty (default) =
+            one-shot, no history.
     """
     return await _delegate_impl(
         prompt,
@@ -470,6 +485,7 @@ async def auto(
         timeout_s=timeout_s,
         project=project,
         budget_usd=budget_usd,
+        continue_task_id=continue_task_id,
     )
 
 
@@ -483,12 +499,28 @@ async def _delegate_impl(
     timeout_s: int,
     project: str = "",
     budget_usd: float | None = None,
+    continue_task_id: str = "",
 ) -> str:
     from khimaira.dispatch.circuit import get_circuit
     from khimaira.dispatch.classifier import classify_task
+    from khimaira.dispatch.conversations import (
+        append_turn,
+        load_history,
+        render_history_as_prompt_prefix,
+    )
     from khimaira.dispatch.pool_router import select_from_pool
     from khimaira.dispatch.runners import RUNNERS, get_runner
     from khimaira.usage import get_recorder, project_spend_usd, runner_to_provider
+
+    # Capture the original user prompt before we prepend conversation
+    # history — we append THIS to the conversation log, not the
+    # combined-with-history string.
+    user_prompt_for_log = prompt
+    if continue_task_id:
+        history = load_history(continue_task_id)
+        prefix = render_history_as_prompt_prefix(history)
+        if prefix:
+            prompt = prefix + prompt
 
     circuit = get_circuit()
 
@@ -639,6 +671,16 @@ async def _delegate_impl(
         log.warning("delegate: usage recording failed: %s", exc)
 
     out = result.text.strip()
+
+    # If this dispatch was part of a multi-turn conversation, append the
+    # new turn so the next call sees it as history. Best-effort —
+    # filesystem errors here don't break the response we already have.
+    if continue_task_id:
+        try:
+            append_turn(continue_task_id, user_prompt_for_log, out)
+        except OSError as exc:
+            log.warning("delegate: conversation append failed: %s", exc)
+
     header = (
         f"_(via {chosen_runner}/{result.model or chosen_model} · "
         f"{result.input_tokens}→{result.output_tokens} tokens · "
