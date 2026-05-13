@@ -484,10 +484,13 @@ async def _delegate_impl(
     project: str = "",
     budget_usd: float | None = None,
 ) -> str:
+    from khimaira.dispatch.circuit import get_circuit
     from khimaira.dispatch.classifier import classify_task
     from khimaira.dispatch.pool_router import select_from_pool
-    from khimaira.dispatch.runners import get_runner
+    from khimaira.dispatch.runners import RUNNERS, get_runner
     from khimaira.usage import get_recorder, project_spend_usd, runner_to_provider
+
+    circuit = get_circuit()
 
     # Pre-dispatch budget gate. Loose by design — one in-flight call
     # can overshoot the cap, but the next call gets cut off cleanly.
@@ -512,7 +515,21 @@ async def _delegate_impl(
     # bypasses the pool router with a hard-coded model mapping.
     if tier == "auto":
         classification = await classify_task(prompt)
-        decision = select_from_pool(classification)
+
+        # Combine standard runner-availability with circuit-open check so
+        # cooled-down runners are naturally excluded from the pool. Auto
+        # mode then falls back to the next-cheapest model whose runner is
+        # both installed AND not currently in a rate-limit / failure
+        # cooldown (#52 + #53).
+        def _runner_pickable(runner_name: str) -> bool:
+            r = RUNNERS.get(runner_name)
+            if r is None or not r.is_available():
+                return False
+            return not circuit.is_open(runner_name)
+
+        decision = select_from_pool(
+            classification, runner_available=_runner_pickable
+        )
         if decision.refused or decision.chosen is None:
             return f"❌ auto routing refused: {decision.refusal_reason}"
         chosen_runner = decision.chosen.runner
@@ -556,6 +573,18 @@ async def _delegate_impl(
             f"Install Claude Code / Codex / Gemini / Ollama, or change tier."
         )
 
+    # Circuit gate for explicit-tier path. Auto mode already excluded
+    # cooled-down runners at pool-pick time; explicit-tier didn't, so
+    # check here. (Auto mode reaching this point with a cooled runner
+    # means the circuit opened mid-pick — a race, treat as a refusal.)
+    if circuit.is_open(chosen_runner):
+        cooldown_s = circuit.seconds_until_recovered(chosen_runner)
+        return (
+            f"❌ runner {chosen_runner!r} is cooled down "
+            f"(~{cooldown_s:.0f}s remaining). Try a different tier, "
+            f"or wait for the cooldown to expire."
+        )
+
     try:
         result = await runner.run(
             prompt,
@@ -563,7 +592,32 @@ async def _delegate_impl(
             timeout=timeout_s,
         )
     except Exception as e:
+        # Distinguish rate-limit / billing errors (short cooldown,
+        # runner is healthy but throttled) from other failures
+        # (incremental failure counter, opens circuit after K).
+        # The runners raise distinct types when they can; fall back to
+        # message-based detection for the rest.
+        from khimaira.dispatch.runners.claude import ClaudeAuthError
+
+        msg = str(e).lower()
+        is_rate_limited = (
+            isinstance(e, ClaudeAuthError)
+            or "rate limit" in msg
+            or "rate_limit" in msg
+            or "429" in msg
+            or "credit balance" in msg
+            or "quota" in msg
+        )
+        if is_rate_limited:
+            circuit.record_rate_limit(chosen_runner)
+        else:
+            circuit.record_failure(chosen_runner)
         return f"❌ delegate dispatch failed: {e}"
+
+    # A successful dispatch clears any in-flight failure streak AND any
+    # active cooldown for this runner (a runner that just succeeded is
+    # by definition healthy again).
+    circuit.record_success(chosen_runner)
 
     # Record usage with the correct mode so `khimaira usage savings` can
     # attribute savings only to auto-mode calls. Project label flows
