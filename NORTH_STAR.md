@@ -156,6 +156,72 @@ once heuristic is calibrated.
 **Done when**: After a week of real traffic, we have data on leakage
 rate and mis-route rate. Decision on v2 is informed by data, not vibes.
 
+### Phase 1.5 — Cross-machine backend  (2-3 weeks; pending scope-lock)
+
+> Inserted between Phase 1 (foundation) and Phase 2 (cross-editor) so
+> the `StateClient` abstraction lands before cross-editor adapters
+> consume it. See spike: `tasks/cross-machine-backend/IMPLEMENTATION.md`.
+
+Today every khimaira install is an island — local `~/.local/state/khimaira/`,
+local daemon at `localhost:8740`, local MCP registration. Joseph
+bootstrapped a second machine on 2026-05-13; the cross-machine friction
+(handoffs don't flow, `usage savings` only sees local, `/ask` can't
+cross hosts) is now a daily pain point.
+
+**Phase 1.5a — MVP (Option E: SSH-tunneled single backend)**:
+
+- Add `KHIMAIRA_BACKEND_URL` env var. When set, every state operation
+  in the MCP server + CLI routes through HTTP to that URL instead of
+  local files.
+- Introduce a `StateClient` abstraction that picks local-file vs HTTP
+  based on env (future-proof for Phase 1.5b's Postgres backend).
+- Refactor the direct-Python call sites in `server/mcp.py` to go
+  through `StateClient` (~30-60 sites per the spike).
+- Document the SSH tunnel pattern as the auth story (sidesteps
+  designing a token/mTLS scheme).
+- Project identity primitive (resolve "same project across worktrees"
+  — cwd-literal keying breaks when `~/dev/khimaira` and `~/code/khimaira`
+  are the same logical project). Pending answer to spike's open
+  question #3.
+
+**Done when (1.5a)**: A handoff posted from desktop's khimaira surfaces
+in laptop's SessionStart hook on next boot. `khimaira usage savings`
+on either machine reflects the aggregate. `/ask laptop-session "..."`
+from desktop session unblocks when laptop wakes.
+
+**Phase 1.5b — Optional Postgres backend** (deferred until 1.5a in use):
+
+Same `StateClient` abstraction, new implementation behind it. Adds
+`DATABASE_URL` path for users who want real multi-writer support.
+JSONL primitives → Pydantic-derived SQL tables. Buys query power
+(`khimaira usage savings --aggregate` becomes one GROUP BY) and
+operational story (backups, replication).
+
+**Scope-lock blockers** (gated on chimera-extension's follow-up dig):
+
+- Latency budget for the hot-path write operations (PostToolUse +
+  UserPromptSubmit + decision logging) under each transport tier
+  (LAN ~1ms, Tailscale WAN 30-100ms, exit-relay 100-300ms). Drives
+  whether 1.5a ships with sync HTTP or write-buffer-then-flush.
+- Project identity decision: git-remote-origin vs explicit label.
+
+**Risks**:
+
+- SPOF if backend machine is asleep/closed — needs documented
+  degraded-mode (read-only-cache? offline-queue-then-replay?).
+- Latency regression if naive sync HTTP for hot-path writes —
+  see scope-lock blockers above.
+
+**Strategic rationale for inserting before Phase 2**: the
+`StateClient` abstraction the cross-machine refactor needs is also
+what the cross-editor adapters benefit from (Cursor / Neovim
+adapters hit the same backend). Doing 1.5 first means Phase 2
+inherits a more-tested foundation. Trade-off: Phase 2 (the editor-
+agnostic pitch) is the public-launch story; 1.5 is the
+power-user-quality-of-life story. If launch timing dominates, 1.5
+can slip to Phase 5 (post-launch). The current order assumes
+dogfooding correctness > launch speed.
+
 ### Phase 2 — Cross-editor adapter configs  (1-2 weeks)
 
 `contrib/` examples, not khimaira core. Demonstrates that the protocol
