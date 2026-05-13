@@ -112,9 +112,7 @@ async def _get_hypervisor_graph():
     """Get or build the HVD graph (lazy async singleton)."""
     global _hypervisor_graph, _hypervisor_checkpointer
     if _hypervisor_graph is None:
-        _hypervisor_graph, _hypervisor_checkpointer = await build_hypervisor_graph(
-            config
-        )
+        _hypervisor_graph, _hypervisor_checkpointer = await build_hypervisor_graph(config)
     return _hypervisor_graph
 
 
@@ -122,9 +120,7 @@ async def _get_components_graph():
     """Get or build the ACL graph (lazy async singleton)."""
     global _components_graph, _components_checkpointer
     if _components_graph is None:
-        _components_graph, _components_checkpointer = await build_components_graph(
-            config
-        )
+        _components_graph, _components_checkpointer = await build_components_graph(config)
     return _components_graph
 
 
@@ -140,9 +136,7 @@ async def _get_toolbuilder_graph():
     """Get or build the POB graph (lazy async singleton)."""
     global _toolbuilder_graph, _toolbuilder_checkpointer
     if _toolbuilder_graph is None:
-        _toolbuilder_graph, _toolbuilder_checkpointer = await build_toolbuilder_graph(
-            config
-        )
+        _toolbuilder_graph, _toolbuilder_checkpointer = await build_toolbuilder_graph(config)
     return _toolbuilder_graph
 
 
@@ -197,9 +191,7 @@ async def research(question: str, context: str = "", cwd: str = "") -> str:
 
 @mcp.tool()
 @logged_tool("architect")
-async def architect(
-    goal: str, context: str = "", constraints: str = "", cwd: str = ""
-) -> str:
+async def architect(goal: str, context: str = "", constraints: str = "", cwd: str = "") -> str:
     """Design an implementation plan using Claude Code CLI.
 
     Writes `tasks/<slug>/IMPLEMENTATION.md` and `tasks/<slug>/TODO.md` into
@@ -254,9 +246,7 @@ def _save_brainstorm(topic: str, claude_out: str, base_dir: str) -> Path:
         candidate = folder / f"{slug}-{today}-{suffix}.md"
         suffix += 1
 
-    body = (
-        f"# Brainstorm — {topic}\n\n**Date:** {today}\n\n---\n\n{claude_out.strip()}\n"
-    )
+    body = f"# Brainstorm — {topic}\n\n**Date:** {today}\n\n---\n\n{claude_out.strip()}\n"
     candidate.write_text(body, encoding="utf-8")
     _open_in_default_app(candidate)
     return candidate
@@ -353,9 +343,7 @@ async def brainstorm(topic: str, context: str = "", cwd: str = "") -> str:
     # new OrchestratorConfig schema.)
     import os as _os
 
-    target_cwd = (
-        cwd or _os.environ.get("PROJECT_ROOT") or _os.environ.get("PWD") or _os.getcwd()
-    )
+    target_cwd = cwd or _os.environ.get("PROJECT_ROOT") or _os.environ.get("PWD") or _os.getcwd()
 
     prompt = build_prompt(
         BRAINSTORM_SYSTEM_PROMPT,
@@ -367,11 +355,7 @@ async def brainstorm(topic: str, context: str = "", cwd: str = "") -> str:
     claude_out = await run_claude(prompt, cwd=target_cwd)
 
     saved = _save_brainstorm(topic, claude_out, target_cwd)
-    rel = (
-        saved.relative_to(target_cwd)
-        if str(saved).startswith(str(target_cwd))
-        else saved
-    )
+    rel = saved.relative_to(target_cwd) if str(saved).startswith(str(target_cwd)) else saved
     return f"Saved to `{rel}` ({len(claude_out)} chars)."
 
 
@@ -427,18 +411,74 @@ async def delegate(
         tier: "auto" | "haiku" | "flash" | "sonnet" | "gemini-pro" | "local".
         timeout_s: max wall time. Default 120s; raise for long generations.
     """
-    from chimera.dispatch import router as dispatch_router
-    from chimera.dispatch.classifier import classify_task
-    from chimera.dispatch.runners import get_runner
+    return await _delegate_impl(prompt, tier=tier, timeout_s=timeout_s)
 
-    # tier="auto" → run the classifier. Otherwise build a synthetic
-    # classification with the user's chosen tier mapped to a runner+model.
+
+@mcp.tool()
+@logged_tool("auto")
+async def auto(prompt: str, timeout_s: int = 120) -> str:
+    """**Auto-routed answer.** Same as `delegate(tier="auto")` — picks the
+    cheapest competent model from your enabled-for-auto pool, runs the
+    prompt, returns the answer.
+
+    Prefer this over `delegate` when you don't care about picking the
+    tier yourself. The classifier + pool router decide based on:
+      - what the prompt looks like (factual lookup vs code task vs deep
+        reasoning)
+      - what models you've enabled in `~/.chimera/models.yaml`
+      - cost per million tokens for each eligible model
+
+    Cheapest model that covers required capabilities wins. The audit
+    trail (pool size, top 2 candidates, rejected reasons) is logged so
+    `chimera usage savings --audit` can show post-hoc whether routing
+    is doing the right thing.
+
+    Args:
+        prompt: the prompt to delegate.
+        timeout_s: max wall time. Default 120s.
+    """
+    return await _delegate_impl(prompt, tier="auto", timeout_s=timeout_s)
+
+
+# Shared implementation behind `delegate` + `auto`. Kept as a private
+# helper so both MCP tools route through one code path — keeps usage
+# tracking, audit logging, and error envelopes consistent.
+async def _delegate_impl(prompt: str, *, tier: str, timeout_s: int) -> str:
+    from chimera.dispatch.classifier import classify_task
+    from chimera.dispatch.pool_router import select_from_pool
+    from chimera.dispatch.runners import get_runner
+    from chimera.usage import get_recorder, runner_to_provider
+
+    # tier="auto" → classifier + pool router (cheapest competent model
+    # from the registry's auto pool). Otherwise: explicit tier shortcut
+    # bypasses the pool router with a hard-coded model mapping.
     if tier == "auto":
         classification = await classify_task(prompt)
+        decision = select_from_pool(classification)
+        if decision.refused or decision.chosen is None:
+            return f"❌ auto routing refused: {decision.refusal_reason}"
+        chosen_runner = decision.chosen.runner
+        chosen_model = decision.chosen.id
+        mode = "auto"
+        # Surface the audit trail in logs (single line so chimera.log can
+        # be grepped post-hoc). The dispatch decision log lives at
+        # ~/.local/state/chimera/chimera.log — `chimera usage savings
+        # --audit` reads it back.
+        log.info(
+            "auto-route audit: model=%s runner=%s confidence=%.2f pool=%d/avail=%d/elig=%d top2=%s rejected=%s",
+            chosen_model,
+            chosen_runner,
+            decision.classifier_confidence,
+            decision.pool_size,
+            decision.available_size,
+            decision.eligible_size,
+            decision.top_2,
+            decision.rejected,
+        )
     else:
-        # Manual tier-to-runner mapping. Keep these stable across
-        # routing-table revisions — the user's tier hint should yield
-        # the same dispatch regardless of which CLI they have installed.
+        # Explicit-tier shortcut. Stable across routing-table revisions
+        # so a user's tier hint yields the same dispatch regardless of
+        # which CLI is installed (caller's choice; no fallback).
         tier_map = {
             "haiku": ("claude", "claude-haiku-4-5"),
             "flash": ("gemini", "gemini-2.5-flash"),
@@ -447,54 +487,48 @@ async def delegate(
             "local": ("ollama", ""),
         }
         if tier not in tier_map:
-            return (
-                f"❌ unknown tier {tier!r}. "
-                f"Valid: auto, {', '.join(sorted(tier_map))}."
-            )
-        runner_name, model = tier_map[tier]
-        from chimera_types import TaskClassification
+            return f"❌ unknown tier {tier!r}. Valid: auto, {', '.join(sorted(tier_map))}."
+        chosen_runner, chosen_model = tier_map[tier]
+        mode = "explicit-tier"
 
-        # task_type "classify" + complexity_tier "trivial" so the
-        # downstream router treats this as a cheap one-shot, not as
-        # a multi-step pipeline.
-        classification = TaskClassification(
-            task_type="classify",
-            complexity_tier="trivial",
-            thinking_level="none",
-            recommended_runner=runner_name,
-            recommended_model=model,
-            thinking_budget_tokens=0,
-            estimated_cost_usd_max=0.05,
-            reasoning=f"explicit tier={tier!r} via mcp__chimera__delegate",
-            confidence=1.0,
-            forced_by=f"delegate(tier={tier!r})",
-        )
-
-    decision = dispatch_router.route(classification)
-    if decision.refused:
-        return f"❌ delegate refused: {decision.refusal_reason}"
-
-    runner = get_runner(decision.chosen_runner)
+    runner = get_runner(chosen_runner)
     if not runner.is_available():
         return (
-            f"❌ runner {decision.chosen_runner!r} not available on this machine. "
+            f"❌ runner {chosen_runner!r} not available on this machine. "
             f"Install Claude Code / Codex / Gemini / Ollama, or change tier."
         )
 
     try:
         result = await runner.run(
             prompt,
-            model=decision.chosen_model or None,
+            model=chosen_model or None,
             timeout=timeout_s,
         )
     except Exception as e:
         return f"❌ delegate dispatch failed: {e}"
 
+    # Record usage with the correct mode so `chimera usage savings` can
+    # attribute savings only to auto-mode calls.
+    try:
+        await get_recorder().record(
+            runner=chosen_runner,
+            provider=runner_to_provider(chosen_runner),
+            model=result.model or chosen_model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            latency_s=result.latency_s,
+            role="delegate",
+            source="cli",
+            mode=mode,
+        )
+    except Exception as exc:  # noqa: BLE001 — usage tracking must never break dispatch
+        log.warning("delegate: usage recording failed: %s", exc)
+
     out = result.text.strip()
     header = (
-        f"_(via {decision.chosen_runner}/{result.model or decision.chosen_model} · "
+        f"_(via {chosen_runner}/{result.model or chosen_model} · "
         f"{result.input_tokens}→{result.output_tokens} tokens · "
-        f"{result.latency_s:.1f}s)_\n\n"
+        f"{result.latency_s:.1f}s · mode={mode})_\n\n"
     )
     return header + out
 
@@ -579,9 +613,7 @@ async def chain(task_description: str, context: str = "", thread_id: str = "") -
 
 @mcp.tool()
 @logged_tool("chain_pipeline")
-async def chain_pipeline(
-    task_description: str, context: str = "", thread_id: str = ""
-) -> str:
+async def chain_pipeline(task_description: str, context: str = "", thread_id: str = "") -> str:
     """Start the SPR-4 pipeline (CHIMERA) in the background.
 
     SPR-4 runs a phased pipeline: research → planning → implementation → review.
@@ -636,9 +668,7 @@ async def chain_pipeline(
                 is_paused = any("human_review" in str(n) for n in next_nodes)
                 if is_paused:
                     job.status = "paused"
-                    job.progress.append(
-                        "Paused — waiting for human approval (SPR-4 review phase)"
-                    )
+                    job.progress.append("Paused — waiting for human approval (SPR-4 review phase)")
                     log.info("job %s: paused at review phase", job.job_id)
                     notify_job_update(job)
                     return
@@ -1074,9 +1104,7 @@ async def approve(job_id: str, feedback: str = "") -> str:
         resume_value = {"decision": "approved", "feedback": ""}
 
     job.status = "running"
-    job.progress.append(
-        f"Resumed — {'rejected with feedback' if feedback else 'approved'}"
-    )
+    job.progress.append(f"Resumed — {'rejected with feedback' if feedback else 'approved'}")
 
     async def _run_resume():
         try:
@@ -1292,9 +1320,7 @@ def _build_pipeline_progress_message(node_name: str, state_update: dict) -> str:
         handoff = state_update.get("handoff_type", "")
         if new_phase == "done":
             return f"{phase_tag}Phase router: finishing"
-        return f"Phase router → {new_phase}" + (
-            f" (handoff={handoff})" if handoff else ""
-        )
+        return f"Phase router → {new_phase}" + (f" (handoff={handoff})" if handoff else "")
 
     # Memory nodes
     if node_name == "load_memory":
@@ -1343,9 +1369,7 @@ def _format_graph_result(state: dict) -> str:
     if history_list:
         journey = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(history_list))
         calls = ", ".join(f"{k}: {v}" for k, v in sorted(node_calls.items()))
-        output_parts.append(
-            f"## Supervisor Journey\n\n{journey}\n\n**Node calls:** {calls}"
-        )
+        output_parts.append(f"## Supervisor Journey\n\n{journey}\n\n**Node calls:** {calls}")
 
     review_status = state.get("human_review_status", "")
     if review_status:
@@ -1383,7 +1407,12 @@ def _format_graph_result(state: dict) -> str:
 
 async def _cleanup():
     """Close checkpointer connections on shutdown."""
-    global _checkpointer, _pipeline_checkpointer, _refiner_checkpointer, _swarm_checkpointer, _hypervisor_checkpointer
+    global \
+        _checkpointer, \
+        _pipeline_checkpointer, \
+        _refiner_checkpointer, \
+        _swarm_checkpointer, \
+        _hypervisor_checkpointer
     global _components_checkpointer, _deadcode_checkpointer, _toolbuilder_checkpointer
     for name, cp in [
         ("supervisor", _checkpointer),
@@ -1571,9 +1600,7 @@ async def monitor_auto_fix(check: str, project: str = "") -> str:
     anomaly = matching[-1]  # most-recent in append order
 
     proposal = await auto_fix.propose_fix(anomaly)
-    gh_status = (
-        "✓ available" if auto_fix.is_gh_available() else "✗ not installed/authenticated"
-    )
+    gh_status = "✓ available" if auto_fix.is_gh_available() else "✗ not installed/authenticated"
 
     return (
         f"**Auto-fix proposal saved.**\n\n"
@@ -1629,9 +1656,7 @@ async def monitor_api_routes(project: str, graph_linked_only: bool = False) -> s
 
 @mcp.tool()
 @logged_tool("monitor_frontend_components")
-async def monitor_frontend_components(
-    project: str, with_api_calls_only: bool = False
-) -> str:
+async def monitor_frontend_components(project: str, with_api_calls_only: bool = False) -> str:
     """React/Next components in a project + their API calls + state hooks.
 
     Companion to `monitor_api_routes` — together they let
@@ -1825,9 +1850,7 @@ async def session_log_touch(
         summary: short description ("refactored auth gate", "added type hints").
         line_start, line_end: optional line range.
     """
-    return await _monitor_tools.session_log_touch(
-        session_id, file, summary, line_start, line_end
-    )
+    return await _monitor_tools.session_log_touch(session_id, file, summary, line_start, line_end)
 
 
 @mcp.tool()
@@ -2208,9 +2231,7 @@ async def session_wait_for_answer(
         question_id: the 12-char hex id from session_log_question.
         timeout: max seconds to wait. Default 300 (5 min).
     """
-    return await _monitor_tools.session_wait_for_answer(
-        session_id, question_id, timeout
-    )
+    return await _monitor_tools.session_wait_for_answer(session_id, question_id, timeout)
 
 
 @mcp.tool()
