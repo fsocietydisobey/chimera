@@ -1,30 +1,184 @@
 # Cross-machine khimaira backend
 
-**Status**: research / spike — not started
-**Phase**: candidate for NORTH_STAR Phase 5 (post-launch) or earlier if multi-machine becomes a daily-use pain point
-**Owner**: TBD (handed off to khimaira-13)
+**Status**: scope-corrected 2026-05-13 — see banner below
+**Phase**: NORTH_STAR Phase 1.5 (3-5 days for the MVP task-dispatch primitive)
+**Owner**: TBD
 **Last reviewed**: 2026-05-13
+
+> **🎯 Primary goal: cross-machine TASK DISPATCH, not full state
+> replication.** The user wants to assign a piece of work to another
+> machine (with the context bundle the work needs) and have that
+> machine pull it on its next SessionStart. Most of this doc was
+> originally written for the broader state-replication problem; the
+> MVP is much narrower. See "Phase 1.5a — Task dispatch MVP" below
+> for what actually ships. Full state replication (the rest of this
+> doc) is deferred to **Phase 1.5b**, gated on the MVP proving
+> demand for it.
 
 ## Why
 
-Right now every khimaira install is an island. Each machine has:
-- Its own `~/.local/state/khimaira/` (sessions, handoffs, usage, decisions, inboxes)
-- Its own `khimaira-monitor` daemon at `localhost:8740`
-- Its own `claude mcp add khimaira` registration
+Joseph runs khimaira on two machines (desktop + laptop, as of 2026-05-13).
+When he's at the desktop and realizes "the laptop is faster at running
+the test suite" — or "the laptop has the Postgres replica already
+loaded" — he wants to *say "do this work over there"* and walk away.
+Today that requires manual context-shuffling: SSH in, open Claude
+Code, paste the prompt, wait, copy back the answer.
 
-When you switch from your desktop to your laptop:
-- Sessions on the desktop are invisible to the laptop
-- Handoffs scoped to a project don't reach the laptop's sessions
-- `khimaira usage savings` only sees what the local machine dispatched
-- Cross-session `/ask` / `/tell` only routes within one machine's daemon
+The MVP closes that loop:
+- One side: `khimaira assign <target> "<task>" --refs <files>`
+- Other side: SessionStart hook on next boot surfaces the assigned
+  task with its context bundle; agent picks it up and runs.
 
-For a solo dev with 2 machines (real, as of 2026-05-13: this user has
-desktop + laptop both running khimaira) this is friction. For any
-team scenario, it's a wall.
+**Out of scope for the MVP** (and that's the point):
+- Sessions on machine A being visible to machine B (full state replication)
+- `khimaira usage savings` aggregating across machines
+- Cross-session `/ask` / `/tell` routing between hosts
+- Read-after-write consistency on every primitive
 
-A peer agent flagged it tersely: *"real cross-machine khimaira, you'd
-need a shared backend (Postgres or HTTP daemon) the team points their
-local khimaira clients at."* This doc is the spike on whether and how.
+If those become daily-use needs later, that's Phase 1.5b.
+
+## Phase 1.5a — Task dispatch MVP (3-5 days)
+
+### The insight
+
+A handoff with an `assignee` field and a `context_refs` list **is a
+task**. Khimaira already has:
+
+- `handoffs.jsonl` storage + 7-day TTL + cwd-scoped consume on SessionStart
+- `attached.json` mapping `project_path` → `label` per machine
+- `khimaira attach` workflow to register a project on each machine
+- SessionStart hook that surfaces matching handoffs as `📦 khimaira handoffs`
+
+What's missing: routing a handoff to a *specific machine* (not just
+"any session in this cwd") and stapling a context bundle to it
+(files, refs, commit SHAs) so the receiving agent can do the work
+without back-and-forth.
+
+### Data-model changes
+
+Two new optional fields on `handoffs.jsonl` records:
+
+```python
+class HandoffRecord:
+    # ... existing fields ...
+    assignee: str | None = None              # project label of the target machine
+    context_refs: list[ContextRef] = []      # files / commits / URLs / pasted text the agent needs
+    pulled_by: str | None = None             # session_id that claimed it (replaces read_by for assigned items)
+    pulled_at: str | None = None             # ISO 8601 timestamp of claim
+```
+
+`ContextRef` is a tagged union:
+
+```python
+ContextRef = (
+    {"kind": "file", "path": "src/foo.py", "machine": "desktop"}      # path on the SENDING machine — receiver fetches via the dispatch payload
+  | {"kind": "commit", "sha": "abc1234", "repo": "khimaira"}          # git ref, receiver resolves locally
+  | {"kind": "url", "url": "https://..."}                              # external link
+  | {"kind": "inline", "text": "..."}                                  # pasted prompt context
+)
+```
+
+For file refs, the sender bundles the file *contents* into the
+dispatch payload — receiver may not have the same working tree state.
+
+### The assignee primitive — project label
+
+`assignee` is a **project label** (registered in `attached.json`), not
+a machine identifier or free-form username. Rationale:
+
+- **Already exists** — `attached.json` stores `project_path` + `label`
+  per registered project on every machine.
+- **Machine-stable** — laptop reinstalls, hostname changes, dotfile
+  migrations all preserve the label as long as the user
+  `khimaira attach`-es with the same name.
+- **Trivially multi-user-extensible** — when teams come along, the
+  label gets prefixed (`alice/jeevy-portal`, `joseph/khimaira`); the
+  resolution logic doesn't change.
+
+If multiple machines have the same label (Joseph attaches `khimaira`
+on both desktop and laptop), the handoff goes to whichever pulls
+first. That's the intended semantic for a solo user with a
+load-balanced pool.
+
+### New endpoints + CLI
+
+```
+POST   /api/handoffs                          # extended: optional assignee + context_refs
+GET    /api/handoffs/pending?assignee=<label> # NEW: receiver pulls anything assigned to this label
+POST   /api/handoffs/{id}/claim               # NEW: mark as pulled_by/pulled_at (atomic, returns false if already claimed)
+```
+
+```bash
+# Sender side:
+khimaira assign laptop "Run the integration suite and report results" \
+  --ref tests/integration/test_dispatch.py \
+  --ref tests/integration/test_runners.py
+
+# Receiver side: auto-pulls on next SessionStart hook (no manual command needed)
+# Or explicitly:
+khimaira pull                                  # show pending tasks for THIS machine
+khimaira pull --claim <handoff_id>             # mark as taken
+```
+
+### SessionStart hook integration
+
+Today's SessionStart consumes cwd-scoped handoffs. Extend to also
+fetch `assignee=<this-machine-label>` handoffs and surface them with
+their context bundle pre-rendered. The agent sees:
+
+```
+📦 khimaira tasks assigned to this machine (1):
+  [handoff abc12345 · 2026-05-13T14:22:00 · from joseph@desktop]
+  Task: Run the integration suite and report results
+
+  Context bundle (2 files):
+  - tests/integration/test_dispatch.py (3.2KB)
+  - tests/integration/test_runners.py (1.8KB)
+
+  Treat as a directive. The sender is awaiting results.
+```
+
+### Implementation order
+
+| Day | Work |
+|---|---|
+| 1 | Extend `handoffs.jsonl` schema with `assignee` + `context_refs` + `pulled_by/at`. Backward-compat: old records load with defaults. |
+| 1 | `context_refs` resolver — file-kind reads + bundles into the dispatch payload at post time (sender side). |
+| 2 | New endpoints: `GET /api/handoffs/pending?assignee=`, `POST /api/handoffs/{id}/claim` (atomic). |
+| 2 | `khimaira assign` + `khimaira pull` CLI commands. |
+| 3 | SessionStart hook extension: pull `assignee=<label>` handoffs alongside the existing cwd-scoped consume. Render the context bundle inline. |
+| 3-4 | Tests: assignment + pull + claim race + context-bundle round-trip + unknown-assignee + already-claimed. |
+| 4-5 | Documentation: README section, `khimaira assign --help`, an `INTEGRATING.md` snippet. End-to-end smoke (Joseph: desktop assigns to laptop, laptop pulls and runs). |
+
+### Open questions (for the implementing session — not blockers)
+
+1. **Context bundle size cap** — if a user runs `khimaira assign laptop "..." --ref entire-repo/`, we shouldn't send 50MB through. Hard cap (say, 1MB total) + clear error when exceeded? Allowlist of file extensions?
+
+2. **Receiver authentication for the claim race** — when two machines have the same label and both pull, the `claim` POST is FCFS via the daemon's lock. But how does the daemon know which machine is asking? For now: just an opaque session_id sent in the body. Multi-user adds auth on top.
+
+3. **Result reporting back** — once the receiver finishes, how does the sender see the result? MVP option: receiver posts a notice to the sender's session id. Cleaner option: a `result` field on the handoff record itself. The MVP can ship without this and ask agents to use `session_post_notice` manually; v2 makes it structured.
+
+4. **Live-machine vs. dormant-machine semantics** — if you `khimaira assign laptop "..."` and the laptop is asleep, the task waits in `handoffs.jsonl` (TTL 7 days). When the laptop wakes, SessionStart surfaces it. That's fine. But if Joseph wants "do this ONLY if a laptop session boots in the next hour" semantics, the TTL needs to be per-handoff. Defer to v2.
+
+### What this does NOT solve (and that's the point)
+
+- Session state from machine A is still invisible on machine B.
+- `khimaira usage savings` still only sees this-machine spend.
+- Cross-session `/ask` doesn't reach across hosts.
+- `mcp__khimaira__session_list()` shows local sessions only.
+
+The 80/20 read: task dispatch is the daily-use need. The rest is
+"would be nice if we ever do teams" — and that's a much bigger build
+that should wait for evidence of demand.
+
+---
+
+## Phase 1.5b — Full state replication (deferred, only if MVP proves demand)
+
+Everything below this line is the original spike — kept for reference
+in case Phase 1.5a graduates into needing genuine multi-machine state.
+**Do not implement any of it before the MVP ships and we have evidence
+of need.**
 
 ## What's actually local-only today
 

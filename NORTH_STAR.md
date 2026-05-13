@@ -157,114 +157,107 @@ once heuristic is calibrated.
 **Done when**: After a week of real traffic, we have data on leakage
 rate and mis-route rate. Decision on v2 is informed by data, not vibes.
 
-### Phase 1.5 — Cross-machine backend  (9-10 days, scope-locked)
+### Phase 1.5 — Cross-machine task dispatch  (3-5 days)
 
-> Inserted between Phase 1 (foundation) and Phase 2 (cross-editor) so
-> the `StateClient` abstraction lands before cross-editor adapters
-> consume it. See spike: `tasks/cross-machine-backend/IMPLEMENTATION.md`.
-> Latency + project-identity decisions resolved via chimera-extension
-> follow-up answer (q=5a9b30df9c3e, 2026-05-13).
+> **Scope-corrected 2026-05-13.** Original spike + my first scope-lock
+> assumed full state replication (9-10 days). Joseph clarified the
+> actual use case: he wants to assign a piece of work to another
+> machine with the context bundle attached. That's a much smaller
+> build. Full state replication is deferred to Phase 1.5b, only if
+> the MVP proves demand for it.
+> See spike: `tasks/cross-machine-backend/IMPLEMENTATION.md`.
 
-Today every khimaira install is an island — local `~/.local/state/khimaira/`,
-local daemon at `localhost:8740`, local MCP registration. Joseph
-bootstrapped a second machine on 2026-05-13; the cross-machine friction
-(handoffs don't flow, `usage savings` only sees local, `/ask` can't
-cross hosts) is a daily pain point.
+**The use case** (real, as of 2026-05-13): Joseph runs khimaira on
+desktop + laptop. He's working on the desktop, realizes "the laptop
+has the Postgres replica already loaded — run the integration suite
+there." Today: SSH in, open Claude Code, paste prompt, wait, copy
+back. Phase 1.5 closes the loop:
 
-**Phase 1.5a — MVP (Option E: SSH-tunneled single backend)**:
-
-Concrete implementation order (9-10 days total — write-queue included
-so WAN/exit-relay dogfooding stays usable from day one):
-
-1. **Consolidated read endpoint** (1d) — `GET /api/sessions/{id}/hook-state`
-   returns inbox + handoffs + incoming + active-sessions in one payload.
-   Cuts the 3-5 separate GETs the existing hooks make down to one
-   roundtrip. ~30 LOC endpoint.
-
-2. **Hook refactor** (1d) — `UserPromptSubmit` + `SessionStart` use the
-   new consolidated endpoint. ~50 LOC.
-
-3. **Local write-queue + background flusher** (2d) — high-frequency
-   writes (`PostToolUse` file_touches, `session_log_touch`) append to
-   `~/.local/state/khimaira/pending-writes.jsonl` synchronously, a
-   daemon-thread or systemd timer POSTs the queue to the remote
-   backend every 1-2s. Lose at most 2s of in-flight on crash; per-touch
-   granularity makes this acceptable. ~100 LOC.
-
-4. **Project-label primitive wiring** (1d) — teach
-   `consume_handoffs(cwd)` to resolve cwd → project labels via
-   `attached.json`, match where `scope_project ∈ labels OR
-   scope_cwd == cwd`. The primitive already exists: `attached.json`
-   stores `project_path` + `label`; `post_handoff` already accepts
-   `scope_project` (currently dead code). This task wires it through
-   the consume side.
-
-5. **Backward-compat shim** (0.5d) — `consume_handoffs` accepts both
-   the new project-label scope and existing cwd-literal entries; old
-   handoffs keep flowing until their 7-day TTL expires.
-
-6. **`KHIMAIRA_BACKEND_URL` plumbing + `StateClient` abstraction**
-   (3-5d) — the bulk. Refactor the ~30-60 direct-Python call sites in
-   `server/mcp.py` to go through `StateClient`, which picks local-file
-   vs HTTP based on env. User-intent writes (`session_log_decision`,
-   `session_post_handoff`, `session_post_answer`) stay synchronous —
-   low volume, agent expects them to land. File-touch / status writes
-   flow through the write-queue from step 3.
-
-Decision rationale (from chimera-extension's dig):
-- **Reads can't buffer** (need authoritative-at-the-moment) but can
-  be consolidated 5→1.
-- **High-frequency writes can buffer** (1-2s loss tolerance is fine for
-  file-touch granularity).
-- **User-intent writes stay sync** (low volume, agent contract requires
-  them to land before next read).
-- **Project label > git-remote-origin** — codebase already made this
-  call (`bootstrap/checks.py:32`). Monorepos / forks / remote-less
-  projects break the remote assumption. Label is explicit, declared at
-  `khimaira attach` time.
-
-Auth: SSH tunnel sidesteps token/mTLS design entirely.
 ```bash
-# On laptop, expose desktop's khimaira locally:
-ssh -L 8740:127.0.0.1:8740 desktop
+# On the desktop:
+khimaira assign laptop "Run integration suite, report results" \
+  --ref tests/integration/test_dispatch.py \
+  --ref tests/integration/test_runners.py
+
+# On the laptop, on next SessionStart:
+# 📦 khimaira tasks assigned to this machine (1):
+#   Task: Run integration suite, report results
+#   Context: [tests/integration/test_dispatch.py + 1 more, bundled inline]
+# → agent picks it up, runs the work, posts a notice back.
 ```
-Daemon stays bound to `127.0.0.1`; SSH already authenticated the user.
 
-**Done when (1.5a)**: A handoff posted from desktop's khimaira surfaces
-in laptop's SessionStart hook on next boot. `khimaira usage savings`
-on either machine reflects the aggregate. `/ask laptop-session "..."`
-from desktop session unblocks when laptop wakes. Latency budget:
-LAN/Tailscale-local adds 30-100ms/turn; WAN Tailscale adds 100-400ms.
-Tailscale exit-relay (1.6-4s) is documented as a known degraded mode.
+**Phase 1.5a — task dispatch MVP** (3-5 days):
 
-**Phase 1.5b — Optional Postgres backend** (deferred until 1.5a in use):
+The insight: a handoff with `assignee` + `context_refs` IS a task.
+Khimaira already has handoffs.jsonl + `attached.json` (project label
+registry) + the SessionStart hook that surfaces matching handoffs.
+The MVP wires the missing parts.
 
-Same `StateClient` abstraction, new implementation behind it. Adds
-`DATABASE_URL` path for users who want real multi-writer support.
-JSONL primitives → Pydantic-derived SQL tables. Buys query power
-(`khimaira usage savings --aggregate` becomes one GROUP BY) and
-operational story (backups, replication).
+1. **Schema extension** (1d) — `handoffs.jsonl` records gain optional
+   `assignee` (project label), `context_refs` (tagged-union list:
+   file / commit / url / inline), `pulled_by` / `pulled_at`.
+   Backward-compat: old records load with defaults.
 
-**Risks (documented as known issues)**:
+2. **Context-ref resolver** (1d, same day) — sender resolves file refs
+   into bundled payload at post time (receiver may not have the same
+   working tree). Size cap (~1MB) with clear error.
 
-- **SPOF**: if the designated backend machine is asleep/closed, all
-  other machines' khimaira is offline. v1 mitigation: the write-queue
-  keeps queueing locally; the read side fails fast with a clear error
-  that names the backend host. Offline-tolerant read cache is a Phase
-  3 stretch from the spike.
-- **Exit-relay latency** (Tailscale routing through a far-away relay):
-  documented as a known issue. Mitigation is on the user's side
-  (prefer LAN / direct-Tailscale routes when possible).
+3. **Pull + claim endpoints** (1d) —
+   `GET /api/handoffs/pending?assignee=<label>` for the receiver to
+   discover, `POST /api/handoffs/{id}/claim` for atomic FCFS-claim
+   when multiple sessions could pick it up.
 
-**Strategic rationale for inserting before Phase 2**: the
-`StateClient` abstraction the cross-machine refactor needs is also
-what the cross-editor adapters benefit from (Cursor / Neovim
-adapters hit the same backend). Doing 1.5 first means Phase 2
-inherits a more-tested foundation. Trade-off: Phase 2 (the editor-
-agnostic pitch) is the public-launch story; 1.5 is the
-power-user-quality-of-life story. If launch timing dominates, 1.5
-can slip to Phase 5 (post-launch). The current order assumes
-dogfooding correctness > launch speed.
+4. **CLI** (1d, same day) — `khimaira assign <label> "<task>"
+   --ref <files...>` on the sender, `khimaira pull` on the receiver
+   (auto-runs in SessionStart, also available explicitly).
+
+5. **SessionStart hook extension** (1d) — pull `assignee=<this-label>`
+   handoffs alongside cwd-scoped ones. Render the context bundle
+   inline so the agent can act without further fetches.
+
+6. **Tests + smoke** (1-2d) — unit + integration. End-to-end smoke:
+   desktop assigns to laptop, laptop pulls and runs, sender sees a
+   result notice.
+
+Decisions baked in:
+- **Assignee = project label** (not machine identifier, not username).
+  Already exists in `attached.json`; machine-stable across reinstalls;
+  trivially extends to multi-user with namespacing (`alice/proj`).
+- **Context refs are tagged-union** (file / commit / url / inline) —
+  file kind bundles contents at post time so receiver doesn't need
+  the same working tree.
+- **Claim race resolution: FCFS at the daemon level.** Two machines
+  with the same label race; whoever POSTs `/claim` first wins.
+- **No machine identity required.** Daemon doesn't need to know which
+  host is asking — labels are the routing primitive.
+
+**Done when (1.5a)**: `khimaira assign laptop "<task>" --ref <files>`
+from the desktop surfaces on the laptop's next SessionStart with the
+context bundle inline. Laptop's agent picks it up, runs it, posts a
+result notice back. Auto-claim prevents duplicate execution when the
+laptop has multiple sessions in the same project.
+
+**Open questions for the implementer** (not blockers — sane defaults
+documented in the spike):
+- Context-bundle size cap policy (hard limit vs. extension allowlist)
+- Result reporting shape (free-form notice vs. structured `result`
+  field on the handoff record — v2 makes it structured)
+- Per-handoff TTL override for "do this in the next hour or skip" semantics
+
+**Phase 1.5b — Full state replication** (deferred indefinitely, only
+if the MVP shows demand):
+
+The original 9-10 day spike — `StateClient` abstraction, consolidated
+read endpoint, write-queue, `KHIMAIRA_BACKEND_URL` plumbing,
+Postgres-backed shared store. Keeps `tasks/cross-machine-backend/IMPLEMENTATION.md`
+content alive in case it becomes the right answer later. Trigger to
+revisit: real evidence that cross-machine session state (not just
+task dispatch) is daily-use friction.
+
+**Strategic position**: Phase 1.5 is now small enough that it doesn't
+fight Phase 2 (cross-editor) for sequencing. Either can ship first.
+Default order keeps 1.5 before 2 because task dispatch is Joseph's
+daily-use need *today*; cross-editor is the launch-story need *later*.
 
 ### Phase 2 — Cross-editor adapter configs  (1-2 weeks)
 
