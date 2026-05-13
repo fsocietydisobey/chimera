@@ -287,8 +287,14 @@ can install and see savings the same day.
 
 ### Phase 4 — Stretch (do once 0-3 ship)
 
-- 4.1 Claude Agent SDK investigation (subscription auth + per-call
-  model swap path for khimaira dispatches)
+- 4.1 ~~Claude Agent SDK migration~~ — **deferred indefinitely**
+  (spike done 2026-05-13, see `tasks/agent-sdk-spike/MEMO.md`).
+  Agent SDK requires API key auth — explicit doc-level prohibition
+  against subscription/claude.ai login. Breaks khimaira's "no API
+  keys to start" pitch. June 2026 `claude -p` subscription-credit
+  change means the existing CLI path gets the same metering anyway,
+  so migration has no upside. Revisit only if subscription auth lands
+  on the SDK directly.
 - 4.2 Transcript-scrape Opus-direct baseline (Phase 4 from peer review)
 - 4.3 PreToolUse interceptor v2 (block-with-override)
 - 4.4 Web dashboard polish (savings graphs, audit log viewer, handoff
