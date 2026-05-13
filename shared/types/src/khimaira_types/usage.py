@@ -25,6 +25,7 @@ Mode = Literal[
     "auto",  # khimaira classifier+pool_router picked the model
     "explicit-tier",  # user passed an explicit tier (haiku/flash/sonnet/local) — bypassed pool_router
     "manual",  # user picked the model directly (khimaira task --model, direct chain call)
+    "subagent",  # Claude Code routed to a ~/.claude/agents/khimaira-*.md subagent (model swap via frontmatter)
     "unknown",  # legacy / pre-mode-tracking records
 ]
 

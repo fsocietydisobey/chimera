@@ -179,12 +179,19 @@ def _run_savings(args: argparse.Namespace) -> int:
         )
         return 0
 
-    # Per-record math: actual cost vs counterfactual baseline cost
+    # Per-record math: actual cost vs counterfactual baseline cost.
+    # Both `auto` (pool router) and `subagent` (Claude Code agent
+    # frontmatter model swap) are routes that picked a cheaper model
+    # than the parent would have used by default — they both count
+    # toward the savings tally.
+    _SAVINGS_MODES = {"auto", "subagent"}
+
     total_actual = 0.0
     total_counterfactual = 0.0
-    total_auto_actual = 0.0
-    total_auto_counterfactual = 0.0
+    total_routed_actual = 0.0
+    total_routed_counterfactual = 0.0
     auto_count = 0
+    subagent_count = 0
     by_dim: dict[str, dict[str, float]] = defaultdict(
         lambda: {"actual": 0.0, "counterfactual": 0.0, "count": 0.0},
     )
@@ -199,10 +206,13 @@ def _run_savings(args: argparse.Namespace) -> int:
         total_actual += actual
         total_counterfactual += counterfactual
 
-        if mode == "auto":
-            auto_count += 1
-            total_auto_actual += actual
-            total_auto_counterfactual += counterfactual
+        if mode in _SAVINGS_MODES:
+            total_routed_actual += actual
+            total_routed_counterfactual += counterfactual
+            if mode == "auto":
+                auto_count += 1
+            else:
+                subagent_count += 1
 
         key = _bucket_key(rec, args.by)
         bucket = by_dim[key]
@@ -210,19 +220,20 @@ def _run_savings(args: argparse.Namespace) -> int:
         bucket["counterfactual"] += counterfactual
         bucket["count"] += 1
 
-    auto_savings = total_auto_counterfactual - total_auto_actual
+    routed_savings = total_routed_counterfactual - total_routed_actual
 
     # Render
     print(f"Window: last {args.days} days  ({len(records)} records)")
-    print(f"  auto-mode records: {auto_count}")
-    print(f"  baseline model:    {baseline_model}")
+    print(f"  auto-mode records:     {auto_count}")
+    print(f"  subagent records:      {subagent_count}")
+    print(f"  baseline model:        {baseline_model}")
     print()
-    print(f"Total actual spend:               ${total_actual:>9.4f}")
-    print(f"If everything had been baseline:  ${total_counterfactual:>9.4f}")
-    print(f"  → savings (auto only):          ${auto_savings:>9.4f}")
-    if total_auto_counterfactual > 0:
-        pct = (auto_savings / total_auto_counterfactual) * 100
-        print(f"  → auto-mode efficiency:         {pct:>9.1f}%  (vs {baseline_model})")
+    print(f"Total actual spend:                  ${total_actual:>9.4f}")
+    print(f"If everything had been baseline:     ${total_counterfactual:>9.4f}")
+    print(f"  → savings (auto + subagent):       ${routed_savings:>9.4f}")
+    if total_routed_counterfactual > 0:
+        pct = (routed_savings / total_routed_counterfactual) * 100
+        print(f"  → routing efficiency:              {pct:>9.1f}%  (vs {baseline_model})")
     print()
 
     print(f"Breakdown by {args.by}:")

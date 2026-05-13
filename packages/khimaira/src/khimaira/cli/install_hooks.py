@@ -4,6 +4,7 @@ Idempotent merge into ~/.claude/settings.json:
   - PostToolUse hook on Edit|Write|MultiEdit|NotebookEdit → auto-log file touches
   - SessionStart hook → auto-read inbox notes from other sessions
   - UserPromptSubmit hook → periodic reminder to log decisions/questions
+  - SubagentStop hook → record khimaira-* subagent dispatches to usage.jsonl
 
 Doesn't clobber existing hooks. Adds khimaira entries alongside whatever's
 already configured. Re-running is safe (replaces by command match).
@@ -208,6 +209,11 @@ def run(args: argparse.Namespace) -> int:
             flush=True,
         )
         print(
+            f"  • SubagentStop → {_build_hook_command('subagent_stop')} "
+            "(records khimaira-* subagent dispatches to usage.jsonl)",
+            flush=True,
+        )
+        print(
             "\nRestart Claude Code so it picks up the new settings.json.",
             flush=True,
         )
@@ -249,6 +255,7 @@ def _add_khimaira_hooks(settings: dict) -> dict:
     pt_cmd = _build_hook_command("post_tool_use")
     ss_cmd = _build_hook_command("session_start")
     ups_cmd = _build_hook_command("user_prompt_submit")
+    sas_cmd = _build_hook_command("subagent_stop")
 
     # Each hook event accepts a list of matchers. We append the khimaira entry
     # if not already present (matched by marker).
@@ -272,6 +279,16 @@ def _add_khimaira_hooks(settings: dict) -> dict:
         "UserPromptSubmit",
         {
             "hooks": [{"type": "command", "command": ups_cmd, _KHIMAIRA_MARKER: True}],
+        },
+    )
+    # No matcher → fires for every SubagentStop. The hook itself
+    # filters on agent_type starting with "khimaira-" so non-khimaira
+    # subagents (Explore, Plan, etc.) are no-ops cost-free.
+    _upsert_hook(
+        hooks,
+        "SubagentStop",
+        {
+            "hooks": [{"type": "command", "command": sas_cmd, _KHIMAIRA_MARKER: True}],
         },
     )
 

@@ -6,9 +6,11 @@ the tests here are paranoid about edge cases:
 
   - empty log → graceful "no data" message
   - mix of auto + manual + explicit-tier records → savings counted
-    ONLY against auto records
+    ONLY against routed records (auto + subagent)
   - records older than --days window → excluded
   - unknown-mode legacy records → don't break the math
+  - subagent-mode records (~/.claude/agents/khimaira-*.md dispatches)
+    contribute to savings alongside auto-mode records
 """
 
 from __future__ import annotations
@@ -111,7 +113,10 @@ def test_auto_record_savings_against_opus_baseline(isolated_usage_log, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     # Don't pin exact decimals — the cost table can shift. Pin the shape:
-    assert "auto-mode records: 1" in out
+    assert "auto-mode records:" in out
+    assert "subagent records:" in out
+    # Match the count irrespective of trailing whitespace
+    assert "auto-mode records:     1" in out
     assert "0.0028" in out  # actual Haiku cost
     assert "0.0525" in out  # Opus baseline
     assert "0.0497" in out  # savings
@@ -122,10 +127,11 @@ def test_manual_and_explicit_tier_records_not_counted_as_savings(
     isolated_usage_log,
     capsys,
 ):
-    """Savings ONLY accrue for auto mode. Manual/explicit-tier dispatches
-    were the user's deliberate choice, not khimaira's pick."""
+    """Savings accrue only for routed modes (auto + subagent). Manual /
+    explicit-tier dispatches were the user's deliberate choice, not
+    khimaira routing automatically — they don't claim savings credit."""
     now = datetime.now(timezone.utc)
-    # 1 manual record + 1 explicit-tier record. No auto records.
+    # 1 manual record + 1 explicit-tier record. No auto or subagent records.
     _write_record(
         isolated_usage_log,
         ts=now - timedelta(hours=1),
@@ -150,10 +156,37 @@ def test_manual_and_explicit_tier_records_not_counted_as_savings(
     rc = usage_cli._run_savings(args)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "auto-mode records: 0" in out
-    # The savings line should show 0.0000 since no auto records
-    assert "savings (auto only)" in out
+    assert "auto-mode records:     0" in out
+    assert "subagent records:      0" in out
+    # The savings line should show 0.0000 since no routed records
+    assert "savings (auto + subagent)" in out
     assert "0.0000" in out
+
+
+def test_subagent_record_counted_in_savings(isolated_usage_log, capsys):
+    """A subagent-mode record (from ~/.claude/agents/khimaira-*.md dispatch)
+    saves tokens the same way an auto-mode record does, and should appear
+    in the savings tally."""
+    now = datetime.now(timezone.utc)
+    _write_record(
+        isolated_usage_log,
+        ts=now - timedelta(hours=1),
+        runner="claude",
+        model="claude-haiku-4-5",
+        mode="subagent",
+        input_tokens=1000,
+        output_tokens=500,
+        cost=0.0028,
+    )
+    args = type("Args", (), {"days": 30, "by": "mode"})()
+    rc = usage_cli._run_savings(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "subagent records:      1" in out
+    assert "auto-mode records:     0" in out
+    # Savings line is non-zero (0.0525 opus baseline - 0.0028 haiku actual)
+    assert "0.0497" in out
+    assert "savings (auto + subagent)" in out
 
 
 # -------------------- time-window filter -------------------- #
@@ -200,7 +233,8 @@ def test_unknown_mode_record_does_not_crash_math(isolated_usage_log, capsys):
     rc = usage_cli._run_savings(args)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "auto-mode records: 0" in out  # unknown != auto
+    assert "auto-mode records:     0" in out  # unknown != auto
+    assert "subagent records:      0" in out  # unknown != subagent
     assert "unknown" in out  # bucket shows up in breakdown
 
 
