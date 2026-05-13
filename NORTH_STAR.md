@@ -114,19 +114,36 @@ editor, and is fully set up after a 3-message conversation.
 **Done when**: An adapter author can read this doc and integrate their
 tool without reading khimaira's source.
 
-### Phase 1.2 — Subagent library  (3-4 days)
+### Phase 1.2 — Subagent library  (3-4 days, split 1.2a + 1.2b)
 
 `~/.claude/agents/khimaira-*.md` curated set, each pinned to the right
 model. Real thinking-token interception inside Claude Code.
 
-- khimaira-factual (haiku), khimaira-grep (haiku), khimaira-code-fast
-  (haiku), khimaira-research (gemini-flash/sonnet), khimaira-code-deep
-  (sonnet), khimaira-architect (opus), khimaira-debug (sonnet) →
-  khimaira-deep-debug (opus) escalation pair.
-- Shipped via the bootstrap framework.
+**1.2a — ship the agents** (done 2026-05-13):
 
-**Done when**: Opus delegates a trivial prompt to a haiku-backed
-subagent automatically, the savings command shows the dispatch.
+- Tight MVP set: khimaira-factual (haiku), khimaira-code-fast (haiku),
+  khimaira-research (sonnet), khimaira-deep-debug (opus).
+- Shipped via the bootstrap framework (dotfiles symlink).
+- Spec: `tasks/subagent-library/IMPLEMENTATION.md`.
+
+**Done when (1.2a)**: From a fresh Claude Code session, invoking
+`@"khimaira-factual (agent) ..."` runs the response on Haiku
+(verified via `/agents` listing + transcript model field). ✅
+
+**1.2b — record dispatches in `usage.jsonl`**:
+
+- Add `"subagent"` to the `Mode` Literal in `khimaira_types/usage.py`.
+- New `SubagentStop` hook writes a `UsageRecord` per dispatch.
+- `khimaira usage savings` includes subagent rows in its tally.
+- Spec: `tasks/subagent-usage-hook/IMPLEMENTATION.md`.
+
+**Done when (1.2b)**: Opus delegates a trivial prompt to a haiku-backed
+subagent automatically, and the savings command shows the dispatch as
+a `mode="subagent"` row.
+
+**Deferred to 1.2c (after first-set usage data exists)**: khimaira-grep,
+khimaira-code-deep, khimaira-architect, khimaira-debug (as distinct
+from deep-debug).
 
 ### Phase 1.3 — PreToolUse interceptor v1  (3-4 days)
 
