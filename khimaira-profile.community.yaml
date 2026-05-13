@@ -1,0 +1,67 @@
+# Community khimaira profile — the "I just want khimaira working" install.
+#
+# This profile is INTENTIONALLY minimal: it brings up the khimaira CLI +
+# MCP server + supervisor + hooks. No personal dotfiles repo. No sibling
+# MCP servers (seance / specter / scarlet) — those live in the same
+# khimaira workspace and are available as library APIs without separate
+# registration. No Linear / GitHub MCP — bring your own task tracker via
+# the task_sources Protocol if you want SessionStart task surfacing
+# (defaults to ~/.khimaira/todo.jsonl, no auth required).
+#
+# Use this as a starting point:
+#
+#   uvx khimaira bootstrap --profile khimaira-profile.community.yaml
+#
+# Or, if you've cloned the khimaira repo:
+#
+#   git clone https://github.com/fsocietydisobey/khimaira.git ~/dev/khimaira
+#   cd ~/dev/khimaira
+#   uv run khimaira bootstrap --profile khimaira-profile.community.yaml
+#
+# To customize: copy this file into your own dotfiles repo, edit it,
+# and re-run `khimaira bootstrap --profile <your-copy>`. Idempotent —
+# safe to re-run on any machine.
+
+name: khimaira-community
+description: |
+  Minimal khimaira install — no personal dotfiles, no extra MCP
+  servers. Works on a fresh machine with just `uv` installed. Customize
+  by copying this file and editing it; see EXAMPLE-PROFILE.yaml for a
+  fully-decorated example with dotfiles + sibling repos.
+
+# No `dotfiles:` block — community install doesn't clone anyone's
+# personal dotfiles. Users who want their own Claude rules / commands /
+# agents shipped via khimaira bootstrap should fork this file, point
+# `dotfiles.repo` at their own dotfiles, and customize.
+
+repos:
+  - name: khimaira
+    url: https://github.com/fsocietydisobey/khimaira.git
+    # `--all-packages` is load-bearing — khimaira is a uv workspace and
+    # plain `uv sync` drops member entry-point scripts (notably
+    # `.venv/bin/khimaira`), which breaks the MCP launcher.
+    install: uv sync --all-packages
+
+mcp_servers:
+  - name: khimaira
+    # Use `python -m khimaira.cli mcp` rather than the bare `khimaira mcp`
+    # entry-point so the launcher survives workspace-sync churn.
+    command: uv --directory ~/dev/khimaira run python -m khimaira.cli mcp 2>>/tmp/khimaira.log
+
+supervisor:
+  # Linux: installs the systemd user unit. macOS: skipped — users on
+  # macOS run `khimaira monitor watch` in a tmux pane or set up a
+  # launchd plist themselves (the systemd path is the only auto-install
+  # we ship today).
+  auto_install: true
+
+# Build the local dashboard SPA at http://localhost:8740/. Optional —
+# the daemon works without it but the visual layer is part of the pitch.
+spa_build: true
+
+# Write khimaira's session hooks into ~/.claude/settings.json on every
+# bootstrap. Includes: SessionStart (auto-surface inbox + handoffs +
+# task sources), UserPromptSubmit (cross-session inbox refresh +
+# decision-log reminder), PostToolUse (auto-track file touches),
+# SubagentStop (record khimaira-* subagent dispatches → usage.jsonl).
+install_claude_hooks: true

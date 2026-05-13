@@ -250,37 +250,29 @@ Same logic, two transports — like an SDK and a SQL interface to the same datab
 
 ## Quick start
 
-### Three install paths, pick what matches you
+> **Full install guide**: [`docs/INSTALL.md`](docs/INSTALL.md) — three paths, what gets written where, MCP catalog gap, uninstall.
 
-**1. You have a khimaira "profile" YAML (you or another maintainer wrote one in dotfiles).** Fastest fresh-machine setup — one command brings the whole agent stack online (khimaira + sibling MCP servers + Claude rules/commands symlinks + supervisor + dashboard SPA):
+### Fastest path — `uvx` + community profile
 
 ```bash
-git clone git@github.com:<you>/dotfiles.git ~/dotfiles
-~/dotfiles/bootstrap.sh
+uvx --from git+https://github.com/fsocietydisobey/khimaira khimaira bootstrap \
+    --profile https://raw.githubusercontent.com/fsocietydisobey/khimaira/main/khimaira-profile.community.yaml
 ```
 
-See [Profile-driven setup](#profile-driven-setup) below for what the YAML declares. New devs can clone the example profile from this repo and adapt.
+This clones khimaira, installs deps, registers the MCP server with Claude Code, writes hooks to `~/.claude/settings.json`, and installs the supervisor — all idempotent, all in one command. No API keys required to start.
 
-**2. You want khimaira and that's it.** No personal config, no sibling tools — just the khimaira CLI + MCP server on this box:
+### Clone-first path
 
 ```bash
 git clone https://github.com/fsocietydisobey/khimaira.git ~/dev/khimaira
 cd ~/dev/khimaira
-uv sync
-uv run khimaira bootstrap   # uses khimaira-shipped default profile
+uv sync --all-packages
+uv run khimaira bootstrap --profile khimaira-profile.community.yaml
 ```
 
-`khimaira bootstrap` with no `--profile` arg runs the built-in baseline: registers khimaira as an MCP server with Claude Code, writes the khimaira SessionStart / UserPromptSubmit / PostToolUse hooks into `~/.claude/settings.json`, installs the host-native supervisor (systemd on Linux, launchd on macOS), builds the dashboard SPA.
+### Personalized path
 
-**3. You're trying khimaira before committing.** Skip bootstrap, just register the MCP server manually:
-
-```bash
-# After uv sync above:
-claude mcp add khimaira -s user -- bash -lc \
-  'uv --directory ~/dev/khimaira run python -m khimaira.cli mcp'
-```
-
-Then `claude` and khimaira's MCP tools (`mcp__khimaira__*`) are available.
+Copy [`khimaira-profile.community.yaml`](khimaira-profile.community.yaml) into your dotfiles repo and customize — add your own dotfiles, sibling MCP servers, custom symlinks. Same profile applied across N machines yields N matching environments. See [`docs/INSTALL.md`](docs/INSTALL.md#path-3--personalized-profile).
 
 ### Day-to-day commands
 
