@@ -28,8 +28,8 @@ export function ProjectIndex() {
             <CardTitle>no langgraph projects discovered</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
-            Add project paths to <code>~/.config/chimera/roots.yaml</code> and
-            restart <code>chimera monitor</code>. Each root is scanned for a
+            Add project paths to <code>~/.config/khimaira/roots.yaml</code> and
+            restart <code>khimaira monitor</code>. Each root is scanned for a
             <code> langgraph</code> dependency or <code>StateGraph</code> import.
           </CardContent>
         </Card>

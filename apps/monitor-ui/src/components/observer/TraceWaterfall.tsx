@@ -174,7 +174,7 @@ export function TraceWaterfall() {
           No events tagged with correlation_id <code>{cid}</code> found in{" "}
           <code>{projectName}</code>'s heartbeat buffer. Either:
           <ul className="mt-2 list-disc pl-5 space-y-1">
-            <li>The app didn't wrap its run in <code>chimera_observer.tag_run(cid)</code></li>
+            <li>The app didn't wrap its run in <code>khimaira_observer.tag_run(cid)</code></li>
             <li>The run completed &gt; 1h ago (heartbeat buffer TTL)</li>
             <li>The observer isn't attached to the project</li>
           </ul>

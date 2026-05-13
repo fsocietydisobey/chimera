@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 export type Theme = "dark" | "space-gray";
 
-const THEME_KEY = "chimera-monitor-theme";
+const THEME_KEY = "khimaira-monitor-theme";
 const THEMES: Theme[] = ["dark", "space-gray"];
 
 export const THEME_LABELS: Record<Theme, string> = {

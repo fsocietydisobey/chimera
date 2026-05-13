@@ -2,10 +2,10 @@
  * MonitorShell — header + project sidebar + content area.
  *
  * Ported from jeevy_portal/frontend/src/features/ai-debugger/AIDebuggerShell.js
- * (re-port at every chimera-monitor phase boundary per locked decision 2026-05-06).
+ * (re-port at every khimaira-monitor phase boundary per locked decision 2026-05-06).
  *
  * Diverges from jeevy's shellRegistry pattern in favor of React Router —
- * chimera-monitor's navigation is project × view (e.g. /chimera/topology),
+ * khimaira-monitor's navigation is project × view (e.g. /khimaira/topology),
  * not a single global activeViewId. Sidebar navigation is anchored on the
  * project; per-view tabs live inside the project layout.
  */
@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/button";
 import { ALL_THEMES, THEME_LABELS, useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-const SIDEBAR_COLLAPSED_KEY = "chimera-monitor-sidebar-collapsed";
+const SIDEBAR_COLLAPSED_KEY = "khimaira-monitor-sidebar-collapsed";
 
 const loadCollapsed = (): boolean => {
   try {
@@ -64,7 +64,7 @@ export function MonitorShell() {
     <div className="flex h-screen min-h-0 flex-col overflow-hidden">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card px-4 min-w-0 gap-3">
         <Link to="/" className="flex items-center gap-2 min-w-0">
-          <span className="text-sm font-semibold truncate">CHIMERA</span>
+          <span className="text-sm font-semibold truncate">KHIMAIRA</span>
           <Badge variant="secondary" className="font-mono text-[10px] shrink-0">
             monitor
           </Badge>

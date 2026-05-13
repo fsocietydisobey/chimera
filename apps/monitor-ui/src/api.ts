@@ -120,8 +120,8 @@ export interface ThreadDetailResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Observer / heartbeat API — populated by chimera_observer (v0.4.0+) on the
-// app side, served by chimera-monitor. Wraps three new endpoints landed in
+// Observer / heartbeat API — populated by khimaira_observer (v0.4.0+) on the
+// app side, served by khimaira-monitor. Wraps three new endpoints landed in
 // commit 77156cf:
 //   GET /api/heartbeats/{project}/cost
 //   GET /api/heartbeats/{project}/slow

@@ -18,7 +18,7 @@
  *
  * Thresholds are per-app-defaults. A future iteration could pull a
  * project-specific threshold from metadata for graphs that legitimately
- * have minutes-long node latency (e.g. chimera's pipeline). For now
+ * have minutes-long node latency (e.g. khimaira's pipeline). For now
  * 5/15 covers the common case.
  */
 

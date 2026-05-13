@@ -1,9 +1,9 @@
 import path from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-// Default backend port — keep in sync with chimera/monitor/cli.py DEFAULT_PORT.
-var BACKEND_PORT = process.env.CHIMERA_MONITOR_PORT
-    ? Number(process.env.CHIMERA_MONITOR_PORT)
+// Default backend port — keep in sync with khimaira/monitor/cli.py DEFAULT_PORT.
+var BACKEND_PORT = process.env.KHIMAIRA_MONITOR_PORT
+    ? Number(process.env.KHIMAIRA_MONITOR_PORT)
     : 8740;
 export default defineConfig({
     plugins: [react()],

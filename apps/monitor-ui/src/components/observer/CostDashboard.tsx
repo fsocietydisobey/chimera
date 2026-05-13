@@ -2,7 +2,7 @@
  * CostDashboard — per-project token usage + estimated USD by model.
  *
  * Backed by GET /api/heartbeats/{project}/cost. Aggregates llm_end events
- * captured by chimera_observer (v0.4.0+) into per-model spend, plus a
+ * captured by khimaira_observer (v0.4.0+) into per-model spend, plus a
  * "telemetry overhead" line item counting LangSmith API calls (which
  * are pure overhead unless the user is actually using LangSmith).
  *
@@ -158,11 +158,11 @@ export function CostDashboard() {
             {data.telemetry_calls_langsmith > 50 ? (
               <>
                 <span className="text-amber-300">heavy:</span> set{" "}
-                <code>CHIMERA_DISABLE_LANGSMITH=true</code> in the app's env to
+                <code>KHIMAIRA_DISABLE_LANGSMITH=true</code> in the app's env to
                 opt out (observer v0.4.0+ shim)
               </>
             ) : (
-              <>opt out via <code>CHIMERA_DISABLE_LANGSMITH=true</code> if unused</>
+              <>opt out via <code>KHIMAIRA_DISABLE_LANGSMITH=true</code> if unused</>
             )}
           </CardContent>
         </Card>
@@ -189,7 +189,7 @@ export function CostDashboard() {
               No <code>llm_end</code> events captured yet for this project.
               Either no LangChain calls have run since the daemon started, or
               the observer isn't attached. Run{" "}
-              <code>chimera attach &lt;app-path&gt;</code> + restart the app
+              <code>khimaira attach &lt;app-path&gt;</code> + restart the app
               to start streaming heartbeats.
             </CardContent>
           </Card>

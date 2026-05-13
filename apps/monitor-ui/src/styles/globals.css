@@ -103,15 +103,15 @@
 }
 
 /* React Flow controls + minimap — dark theme overrides. The library's
-   default styles are light; these match the chimera-monitor palette. */
-.chimera-flow .react-flow__controls {
+   default styles are light; these match the khimaira-monitor palette. */
+.khimaira-flow .react-flow__controls {
   background: hsl(var(--card));
   border: 1px solid hsl(var(--border));
   border-radius: 6px;
   overflow: hidden;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
-.chimera-flow .react-flow__controls-button {
+.khimaira-flow .react-flow__controls-button {
   background: hsl(var(--card));
   border: none;
   border-bottom: 1px solid hsl(var(--border));
@@ -120,24 +120,24 @@
   height: 28px;
   fill: hsl(var(--foreground));
 }
-.chimera-flow .react-flow__controls-button:hover {
+.khimaira-flow .react-flow__controls-button:hover {
   background: hsl(var(--accent));
 }
-.chimera-flow .react-flow__controls-button:last-child {
+.khimaira-flow .react-flow__controls-button:last-child {
   border-bottom: none;
 }
-.chimera-flow .react-flow__controls-button svg {
+.khimaira-flow .react-flow__controls-button svg {
   fill: currentColor;
   max-width: 14px;
   max-height: 14px;
 }
-.chimera-flow .react-flow__minimap {
+.khimaira-flow .react-flow__minimap {
   background: hsl(var(--card));
   border: 1px solid hsl(var(--border));
   border-radius: 6px;
   overflow: hidden;
 }
-.chimera-flow .react-flow__attribution {
+.khimaira-flow .react-flow__attribution {
   display: none;
 }
 

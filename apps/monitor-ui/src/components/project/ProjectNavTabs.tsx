@@ -54,7 +54,7 @@ export function ProjectNavTabs({
       icon: Activity,
       title: currentCorrelationId
         ? "Trace waterfall — chain/llm/tool/external timeline for the current run"
-        : "Trace waterfall — needs a correlation_id (set via chimera_observer.tag_run() in your app)",
+        : "Trace waterfall — needs a correlation_id (set via khimaira_observer.tag_run() in your app)",
       disabled: !currentCorrelationId,
     },
   ];

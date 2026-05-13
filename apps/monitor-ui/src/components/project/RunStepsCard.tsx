@@ -30,7 +30,7 @@ interface RunStepsCardProps {
   onSelectStep: (index: number) => void;
 }
 
-const STORAGE_KEY = "chimera-monitor-run-steps-card-pos";
+const STORAGE_KEY = "khimaira-monitor-run-steps-card-pos";
 
 interface CheckpointWithThread extends CheckpointDetail {
   thread_id: string;

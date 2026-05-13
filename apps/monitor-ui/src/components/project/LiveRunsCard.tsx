@@ -25,7 +25,7 @@ const STATUS_DOT: Record<ThreadStatus, string> = {
   idle: "bg-zinc-500",
 };
 
-const POSITION_KEY = "chimera-monitor-liveruns-position";
+const POSITION_KEY = "khimaira-monitor-liveruns-position";
 const DEFAULT_POSITION = { x: 12, y: 12 };
 
 interface Position {

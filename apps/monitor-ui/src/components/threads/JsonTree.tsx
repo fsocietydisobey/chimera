@@ -2,7 +2,7 @@
  * JsonTree — recursive collapsible JSON renderer.
  *
  * Ported from jeevy_portal/frontend/src/features/ai-debugger/views/langgraph/JsonTree.js
- * (re-port at every chimera-monitor phase boundary per locked decision 2026-05-06).
+ * (re-port at every khimaira-monitor phase boundary per locked decision 2026-05-06).
  *
  * Drift-checked by `scripts/check_jeevy_drift.py`.
  */

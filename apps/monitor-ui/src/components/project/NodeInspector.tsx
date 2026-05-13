@@ -84,7 +84,7 @@ export function NodeInspector({
           </div>
         ) : (
           <div className="rounded-md border border-dashed border-border/60 px-3 py-2 text-[11px] text-muted-foreground italic">
-            No description yet — re-run <code>chimera monitor rescan {projectName}</code> to
+            No description yet — re-run <code>khimaira monitor rescan {projectName}</code> to
             populate node intent from the codebase.
           </div>
         )}

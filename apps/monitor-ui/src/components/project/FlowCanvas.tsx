@@ -545,7 +545,7 @@ export function FlowCanvas({
   );
 
   return (
-    <div className="h-full w-full chimera-flow">
+    <div className="h-full w-full khimaira-flow">
       <ReactFlowProvider>
         <FlowInner
           nodes={nodes}

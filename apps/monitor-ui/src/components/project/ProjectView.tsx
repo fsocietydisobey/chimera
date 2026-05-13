@@ -58,7 +58,7 @@ export function ProjectView() {
   // so the focused-run UX stays clean. Persisted to localStorage.
   const [showAllActive, setShowAllActive] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("chimera-monitor-show-all-active") === "true";
+      return localStorage.getItem("khimaira-monitor-show-all-active") === "true";
     } catch {
       return false;
     }
@@ -67,7 +67,7 @@ export function ProjectView() {
   // entirely (the canvas keeps whatever viewport the user dragged to).
   const [focusZoom, setFocusZoom] = useState<number>(() => {
     try {
-      const raw = localStorage.getItem("chimera-monitor-focus-zoom");
+      const raw = localStorage.getItem("khimaira-monitor-focus-zoom");
       const n = raw ? Number(raw) : NaN;
       return Number.isFinite(n) && n >= 0 ? n : 1.0;
     } catch {
@@ -76,12 +76,12 @@ export function ProjectView() {
   });
   useEffect(() => {
     try {
-      localStorage.setItem("chimera-monitor-focus-zoom", String(focusZoom));
+      localStorage.setItem("khimaira-monitor-focus-zoom", String(focusZoom));
     } catch { /* ignore */ }
   }, [focusZoom]);
   useEffect(() => {
     try {
-      localStorage.setItem("chimera-monitor-show-all-active", String(showAllActive));
+      localStorage.setItem("khimaira-monitor-show-all-active", String(showAllActive));
     } catch { /* ignore */ }
   }, [showAllActive]);
 
@@ -313,7 +313,7 @@ export function ProjectView() {
   // Staleness — surfaces "N stuck" / "N stale" chips so the user spots
   // hung runs at a glance even when not focused on a sidebar row.
   // Thresholds scale with the project's running_threshold so apps with
-  // slow nodes (jeevy: 900s, chimera-pipeline: 600s+) don't false-flag
+  // slow nodes (jeevy: 900s, khimaira-pipeline: 600s+) don't false-flag
   // legitimately long executions as stale.
   const staleCounts = useMemo(
     () => countStaleness(
@@ -685,7 +685,7 @@ function ProjectFlow({
 
   // Auto-switch tab to follow the active node — replay overrides live
   // current_node when scrubbed off-live, and the replay path can span
-  // multiple graphs (e.g. chimera's pipeline → implementation subgraph).
+  // multiple graphs (e.g. khimaira's pipeline → implementation subgraph).
   // Without this, the tab gets stuck on the live graph and the replay's
   // node has nowhere to light up.
   useEffect(() => {

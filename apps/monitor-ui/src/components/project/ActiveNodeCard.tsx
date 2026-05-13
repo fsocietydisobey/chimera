@@ -35,7 +35,7 @@ interface ActiveNodeCardProps {
   lastUpdated: string | null;
 }
 
-const STORAGE_KEY = "chimera-monitor-active-node-card-pos";
+const STORAGE_KEY = "khimaira-monitor-active-node-card-pos";
 
 function loadPos(): { x: number; y: number } {
   try {
