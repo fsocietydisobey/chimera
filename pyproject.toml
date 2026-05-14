@@ -13,6 +13,7 @@ requires-python = ">=3.12"
 dependencies = [
     "khimaira",
     "scarlet",
+    "scribe",
     "seance",
     "specter",
     "khimaira-transport",
@@ -25,6 +26,7 @@ members = ["packages/*", "shared/*"]
 [tool.uv.sources]
 khimaira = { workspace = true }
 scarlet = { workspace = true }
+scribe = { workspace = true }
 seance = { workspace = true }
 specter = { workspace = true }
 khimaira-transport = { workspace = true }
