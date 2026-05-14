@@ -689,14 +689,12 @@ def git_pull_repo(spec: RepoSpec) -> OpResult:
     merge = _run(["git", "-C", str(path), "merge", "--ff-only", "FETCH_HEAD"])
     new_head = _git_head(path) or prev_head
 
-    if prev_head == new_head:
-        return OpResult(
-            op="repo-pull",
-            target=spec.name,
-            status="unchanged",
-            detail="already up to date",
-        )
-
+    # Order matters: check merge exit code BEFORE head-equality. A
+    # successful merge with no upstream changes is "Already up to
+    # date" (rc=0, head unchanged). A refused ff-only merge is rc!=0,
+    # head also unchanged. Both leave HEAD at prev_head, so
+    # head-equality alone can't distinguish "no work needed" from
+    # "diverged, refused to clobber."
     if merge.returncode != 0:
         # FETCH_HEAD diverged from local — would need a real merge or rebase.
         # Sync's contract is "don't touch local work"; surface + bail.
@@ -708,6 +706,14 @@ def git_pull_repo(spec: RepoSpec) -> OpResult:
                 "ff-only merge refused — local has commits not on origin. "
                 f"Resolve manually: cd {path} && git status"
             ),
+        )
+
+    if prev_head == new_head:
+        return OpResult(
+            op="repo-pull",
+            target=spec.name,
+            status="unchanged",
+            detail="already up to date",
         )
 
     proc = _run(
