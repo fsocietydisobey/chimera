@@ -798,28 +798,52 @@ class Interactor:
         except Exception as e:
             return {"error": f"DOM.setFileInputFiles failed: {e}"}
 
-        # Verify + dispatch change. Combined into one Runtime.evaluate so we
-        # don't pay two CDP round-trips. Returns the resulting files info as
-        # JSON for _parse_result-style decoding.
-        verify_script = (
-            "(() => {"
-            f"  const el = document.querySelector({json.dumps(selector)});"
-            "  if (!el) return JSON.stringify({error: 'element disappeared after upload'});"
-            "  if (!('files' in el)) return JSON.stringify({error: 'element is not a file input'});"
-            "  el.dispatchEvent(new Event('input', { bubbles: true }));"
-            "  el.dispatchEvent(new Event('change', { bubbles: true }));"
+        # Verify + dispatch change against the SAME element we just
+        # attached files to (via objectId), not a re-query via the
+        # original selector.
+        #
+        # Why: the prior implementation re-queried with
+        # `document.querySelector(selector)` and read `el.files.length`
+        # from the result. That's a different element in any of these
+        # scenarios:
+        #   - React/Vue re-rendered between attach and verify (common
+        #     in apps that mount file inputs inside controlled wrappers)
+        #   - Page has multiple `<input type=file>` and the selector
+        #     matches more than one (querySelector returns the first;
+        #     not always the one we attached to)
+        #   - A wrapper component swapped the underlying input element
+        # In any of those, setFileInputFiles succeeded on element X
+        # but the verify read files.length from element Y → 0 → the
+        # caller saw `{success: true, count: 0}` and thought the
+        # attach silently failed. The bug was always in the VERIFY
+        # path; the attach worked fine.
+        #
+        # Fix (2026-05-14): use Runtime.callFunctionOn with the same
+        # objectId we passed to setFileInputFiles. `this` binds to the
+        # exact element; no re-query, no element-identity drift. Same
+        # one round-trip cost.
+        verify_fn = (
+            "function() {"
+            "  if (!('files' in this)) return JSON.stringify({"
+            "    error: 'element is not a file input'"
+            "  });"
+            "  this.dispatchEvent(new Event('input', { bubbles: true }));"
+            "  this.dispatchEvent(new Event('change', { bubbles: true }));"
             "  return JSON.stringify({"
             "    success: true,"
-            "    count: el.files.length,"
-            "    names: Array.from(el.files).map(f => f.name),"
-            "    sizes: Array.from(el.files).map(f => f.size),"
+            "    count: this.files.length,"
+            "    names: Array.from(this.files).map(f => f.name),"
+            "    sizes: Array.from(this.files).map(f => f.size),"
             "  });"
-            "})()"
+            "}"
         )
-
         verify_result = await connection.send(
-            "Runtime.evaluate",
-            {"expression": verify_script, "returnByValue": True},
+            "Runtime.callFunctionOn",
+            {
+                "functionDeclaration": verify_fn,
+                "objectId": object_id,
+                "returnByValue": True,
+            },
         )
 
         return _parse_result(verify_result)
