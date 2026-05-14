@@ -231,6 +231,30 @@ def run_sync(
     for repo_spec in profile.repos:
         report.results.append(ops.check_unpushed(repo_spec))
 
+    # --- 8. audit-log this sync run (v2.4 — cross-machine awareness) ---
+    # Append a "sync-run" event to ~/.local/state/khimaira/sync_meta.jsonl.
+    # Per-machine local; no cross-machine sync of the meta file itself.
+    # Lets future syncs answer "when did I last sync this machine?".
+    repos_pulled = sum(
+        1
+        for r in report.results
+        if r.op == "repo-pull" and r.status == "updated"
+    )
+    commits_total = sum(
+        r.meta.get("commits_pulled", 0)
+        for r in report.results
+        if r.op == "repo-pull" and r.status == "updated"
+    )
+    ops.log_sync_event(
+        "sync-run",
+        "all",
+        {
+            "repos_pulled": repos_pulled,
+            "commits_total": commits_total,
+            "had_failures": report.had_failures,
+        },
+    )
+
     return report
 
 

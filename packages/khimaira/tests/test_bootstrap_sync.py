@@ -837,3 +837,82 @@ def test_maybe_reinstall_repo_failed_when_install_errors(isolated_state, tmp_pat
     assert operations._read_install_hashes() == {
         "myrepo": operations._hash_install("uv sync")
     }
+
+
+# -------------------- v2.4: cross-machine push hints + sync audit -------------------- #
+
+
+def test_log_sync_event_appends_jsonl(isolated_state):
+    """log_sync_event writes one JSONL record with ts + machine + action."""
+    import json
+
+    _, operations = isolated_state
+
+    operations.log_sync_event("sync-run", "all", {"repos_pulled": 3})
+    operations.log_sync_event("repo-pull", "myrepo", {"commits_pulled": 5})
+
+    assert operations._SYNC_META_FILE.is_file()
+    lines = operations._SYNC_META_FILE.read_text().strip().splitlines()
+    assert len(lines) == 2
+    rec1, rec2 = json.loads(lines[0]), json.loads(lines[1])
+
+    assert rec1["action"] == "sync-run"
+    assert rec1["target"] == "all"
+    assert rec1["payload"]["repos_pulled"] == 3
+    assert "ts" in rec1 and "machine" in rec1
+    assert rec2["target"] == "myrepo"
+
+
+def test_last_sync_event_returns_most_recent_match(isolated_state):
+    """last_sync_event scans backwards through jsonl + matches by action+target."""
+    _, operations = isolated_state
+
+    operations.log_sync_event("sync-run", "all", {"v": 1})
+    operations.log_sync_event("repo-pull", "myrepo", {"v": 2})
+    operations.log_sync_event("sync-run", "all", {"v": 3})
+
+    latest = operations.last_sync_event("sync-run", "all")
+    assert latest is not None
+    assert latest["payload"]["v"] == 3
+
+    # No match returns None
+    assert operations.last_sync_event("sync-run", "doesnotexist") is None
+
+
+def test_last_sync_event_none_when_no_file(isolated_state):
+    """last_sync_event returns None cleanly when sync_meta.jsonl doesn't exist."""
+    _, operations = isolated_state
+
+    assert operations.last_sync_event("sync-run", "all") is None
+
+
+def test_check_unpushed_includes_age_and_machine_id(remote_with_clone, monkeypatch):
+    """v2.4: unpushed-check detail includes oldest-commit age + machine name."""
+    from khimaira.bootstrap import operations
+
+    _, local = remote_with_clone
+    _seed_commit(local, "a.txt", "a\n", "first local")
+
+    monkeypatch.setattr(operations, "_machine_id", lambda: "testbox")
+
+    result = operations.check_unpushed(_spec_for(local))
+
+    assert result.status == "updated"
+    assert "1 unpushed" in result.detail
+    assert "on `testbox`" in result.detail
+    # Age phrase present (typically "Xs ago" / "Xm ago" — should match
+    # the just-committed-now case)
+    assert "ago" in result.detail
+    assert result.meta["machine"] == "testbox"
+    assert "oldest_age_seconds" in result.meta
+
+
+def test_humanize_age_brackets():
+    """_humanize_age picks unit by magnitude — quick smoke test."""
+    from khimaira.bootstrap.operations import _humanize_age
+
+    assert "s ago" in _humanize_age(30)
+    assert "m ago" in _humanize_age(300)
+    assert "h ago" in _humanize_age(7200)
+    assert "d ago" in _humanize_age(86400 * 3)
+    assert "w ago" in _humanize_age(86400 * 30)

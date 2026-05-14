@@ -518,6 +518,107 @@ def reconcile_mcp_drift(profile_names: set[str]) -> list[OpResult]:
 
 
 # ---------------------------------------------------------------------------
+# Cross-machine sync audit (task #66 v2.4)
+# ---------------------------------------------------------------------------
+
+_SYNC_META_FILE = (
+    Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")))
+    / "khimaira"
+    / "sync_meta.jsonl"
+)
+
+
+def _machine_id() -> str:
+    """Stable per-machine identifier for sync audit logs.
+
+    `socket.gethostname()` works for most setups. Anonymized via
+    truncation isn't useful here — the data stays local on each
+    machine's disk, never crosses the wire.
+    """
+    import socket
+
+    try:
+        return socket.gethostname() or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def log_sync_event(action: str, target: str, payload: dict[str, Any] | None = None) -> None:
+    """Append one event to ~/.local/state/khimaira/sync_meta.jsonl.
+
+    Schema:
+      ts        — ISO8601 UTC of the event
+      machine   — hostname (per-machine; not synced anywhere)
+      action    — "sync-run" | "repo-pull" | "monitor-restart" | "install-rerun"
+      target    — repo name / "all" / "khimaira-monitor"
+      payload   — free-form dict (commits_pulled, etc.)
+
+    Append-only. No daemon sync — each machine keeps its own log.
+    Useful for retrospective "when did I last sync this repo on
+    this machine" queries.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    try:
+        _SYNC_META_FILE.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "machine": _machine_id(),
+            "action": action,
+            "target": target,
+            "payload": payload or {},
+        }
+        with _SYNC_META_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("bootstrap: failed appending to %s: %s", _SYNC_META_FILE, exc)
+
+
+def last_sync_event(action: str, target: str) -> dict[str, Any] | None:
+    """Return the most-recent sync_meta event matching (action, target).
+
+    None if no events recorded yet. Reads the whole jsonl (cheap;
+    typical file < a few thousand lines). For larger histories we'd
+    add a tail-reader; not needed in practice — sync runs aren't
+    that frequent.
+    """
+    import json
+
+    if not _SYNC_META_FILE.is_file():
+        return None
+    try:
+        latest: dict[str, Any] | None = None
+        with _SYNC_META_FILE.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("action") == action and rec.get("target") == target:
+                    latest = rec
+        return latest
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _humanize_age(seconds: float) -> str:
+    """Compact human-readable age. 30s / 5m / 2h / 3d / 2w cadence."""
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds / 3600)}h ago"
+    if seconds < 86400 * 14:
+        return f"{int(seconds / 86400)}d ago"
+    return f"{int(seconds / (86400 * 7))}w ago"
+
+
+# ---------------------------------------------------------------------------
 # Sibling install re-run on profile-cmd change (task #66 v2.3)
 # ---------------------------------------------------------------------------
 
@@ -1176,19 +1277,23 @@ def git_pull_repo(spec: RepoSpec) -> OpResult:
 def check_unpushed(spec: RepoSpec) -> OpResult:
     """Report whether the repo has commits ahead of its tracking branch.
 
-    Informational only — `khimaira sync` never auto-pushes. The user
-    sees the count and decides whether to push from this machine
-    (e.g. they may want to push from a different machine where the
-    commits originated).
+    Informational only — `khimaira sync` never auto-pushes. v2.4
+    enriches the detail with:
+      - age of the oldest unpushed commit (so user can tell "is this
+        a 5min WIP or did I forget to push this last week?")
+      - identity of THIS machine via _machine_id() (helps disambiguate
+        "is this from desktop or laptop?" when reviewing multi-
+        machine state)
 
-    Status semantics:
-      - `unchanged` — local in sync with upstream (the common case)
-      - `updated` — N commits ahead (would-be-pushed in `--check` view)
+    Status semantics unchanged:
+      - `unchanged` — local in sync with upstream
+      - `updated` — N commits ahead
       - `skipped` — no upstream tracking, can't determine
 
-    Never `failed` — an ahead-of-upstream state is not a failure of
-    sync; it's a signal to the user.
+    Never `failed` — an ahead-of-upstream state is a signal, not an error.
     """
+    import time as _time
+
     path = spec.resolved_path()
     if not (path / ".git").is_dir():
         return OpResult(
@@ -1216,12 +1321,46 @@ def check_unpushed(spec: RepoSpec) -> OpResult:
             status="unchanged",
             detail="in sync with origin",
         )
+
+    # v2.4 — surface age of OLDEST unpushed commit + this machine's id
+    oldest_age_s: float | None = None
+    ts_proc = _run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "log",
+            "@{u}..HEAD",
+            "--format=%ct",
+            "--reverse",
+        ]
+    )
+    if ts_proc.returncode == 0:
+        lines = (ts_proc.stdout or "").strip().splitlines()
+        if lines:
+            try:
+                oldest_ts = int(lines[0].strip())
+                oldest_age_s = _time.time() - oldest_ts
+            except ValueError:
+                pass
+
+    machine = _machine_id()
+    detail_parts = [f"{ahead} unpushed commit(s)"]
+    if oldest_age_s is not None and oldest_age_s > 0:
+        detail_parts.append(f"oldest {_humanize_age(oldest_age_s)}")
+    detail_parts.append(f"on `{machine}`")
+    detail = " · ".join(detail_parts)
+
+    meta: dict[str, Any] = {"unpushed_count": ahead, "machine": machine}
+    if oldest_age_s is not None:
+        meta["oldest_age_seconds"] = oldest_age_s
+
     return OpResult(
         op="unpushed-check",
         target=spec.name,
         status="updated",
-        detail=f"{ahead} unpushed commit(s) — push from this machine if origin",
-        meta={"unpushed_count": ahead},
+        detail=detail,
+        meta=meta,
     )
 
 
