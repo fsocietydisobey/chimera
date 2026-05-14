@@ -71,6 +71,7 @@ def build_app():
     # Mount API routers (lazy imports so optional deps don't bite at import time)
     from .api import anomalies as anomalies_api
     from .api import api_routes as api_routes_api
+    from .api import chats as chats_api
     from .api import frontend_components as fc_api
     from .api import heartbeats as heartbeats_api
     from .api import mcp_calls as mcp_calls_api
@@ -96,6 +97,7 @@ def build_app():
     app.include_router(mcp_calls_api.build_router(), prefix="/api")
     app.include_router(heartbeats_api.build_router(), prefix="/api")
     app.include_router(scheduled_tasks_api.build_router(), prefix="/api")
+    app.include_router(chats_api.build_router(), prefix="/api")
 
     # Persistent scheduler — daemon-side replacement for ScheduleWakeup.
     # Replay-on-boot recovers stuck-firing tasks; worker tick fires due tasks.
