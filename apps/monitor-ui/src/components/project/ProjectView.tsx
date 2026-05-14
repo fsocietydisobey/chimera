@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
+import { GripVertical } from "lucide-react";
 
 import { useGetTopologyQuery, useListThreadsQuery, type NodeMeta, type ThreadStatus, type ThreadSummary, type TopologyResponse } from "@/api";
 import { ActiveNodeCard } from "@/components/project/ActiveNodeCard";
@@ -407,16 +408,7 @@ export function ProjectView() {
       <div className="flex flex-1 overflow-hidden">
         <div className="flex-1 relative overflow-hidden">
           {noCheckpointer ? (
-            <Card className="absolute top-3 left-3 z-10 max-w-md">
-              <CardHeader className="py-2">
-                <CardTitle className="text-xs">topology only · no checkpointer</CardTitle>
-              </CardHeader>
-              <CardContent className="text-[11px] text-muted-foreground pt-0">
-                Set a <code>postgres://</code> URL in <code>.env</code> or add
-                a SQLite checkpoint DB to the project's data dir, then
-                restart the daemon to inspect live runs.
-              </CardContent>
-            </Card>
+            <DraggableNoCheckpointerCard />
           ) : (
             <LiveRunsCard
               projectName={projectName}
@@ -900,5 +892,45 @@ function GraphTabs({
         </button>
       ))}
     </div>
+  );
+}
+
+function DraggableNoCheckpointerCard() {
+  const [pos, setPos] = useState<{ x: number; y: number }>({ x: 12, y: 12 });
+  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    setPos({ x: d.origX + (e.clientX - d.startX), y: d.origY + (e.clientY - d.startY) });
+  };
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    dragRef.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
+  return (
+    <Card className="absolute z-10 max-w-md select-none" style={{ left: pos.x, top: pos.y }}>
+      <CardHeader
+        className="flex flex-row items-center gap-1.5 py-2 cursor-grab active:cursor-grabbing touch-none"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        title="Drag to reposition"
+      >
+        <GripVertical className="h-3.5 w-3.5 text-muted-foreground/60" />
+        <CardTitle className="text-xs">topology only · no checkpointer</CardTitle>
+      </CardHeader>
+      <CardContent className="text-[11px] text-muted-foreground pt-0 select-text">
+        Set a <code>postgres://</code> URL in <code>.env</code> or add
+        a SQLite checkpoint DB to the project's data dir, then
+        restart the daemon to inspect live runs.
+      </CardContent>
+    </Card>
   );
 }
