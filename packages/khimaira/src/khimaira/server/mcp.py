@@ -2456,6 +2456,126 @@ async def session_wait_for_answer(
 
 
 @mcp.tool()
+@logged_tool("delegate_to_agents")
+async def delegate_to_agents(
+    from_session_id: str,
+    targets: list[str],
+    task: str,
+    timeout: float = 900.0,
+) -> str:
+    """**Master/agent fan-out.** Send one task to N agent sessions in
+    parallel + collect their answers.
+
+    The pattern: one "master" Claude Code session leads a work block;
+    N "agent" sessions registered themselves via `/listen` (which
+    does `session_set_name` + `session_set_status('listening', ...)`).
+    Master calls this tool to delegate the same task to all of them;
+    each agent's UserPromptSubmit hook surfaces the question on its
+    next turn; user wakes each agent (types anything in its window);
+    agent answers via `session_post_answer`; master collects.
+
+    Workflow:
+      1. For each target, open a targeted question via the daemon's
+         `POST /api/sessions/{master}/question` (no waiting).
+      2. asyncio.gather `session_wait_for_answer` over each question
+         id — parallel long-polls. As each agent answers, the future
+         resolves; master collects all N within the timeout window.
+
+    Per-target timeout (not aggregate): one slow agent doesn't
+    block others. Default 900s (15 min) matches the /ask command's
+    feel — enough time for the user to switch terminals + wake each
+    agent + the agent to do non-trivial work.
+
+    Wake-up is MANUAL by design — Claude Code sessions don't
+    auto-resume on incoming questions, so the user has to type
+    anything in each agent window to let its UserPromptSubmit hook
+    fire. This is the natural sync point; auto-polling would burn
+    compute + create feedback loops.
+
+    Args:
+        from_session_id: master session id (the "from" attribution).
+            Resolved by the slash command before invocation.
+        targets: list of agent session ids or friendly names.
+            Each one must already be a registered khimaira session
+            (typically via `/listen <name>`).
+        task: the task body sent verbatim to each agent. Include
+            any per-agent context inline OR write context to a tmp
+            file and reference it as `Read CONTEXT.md` in the task.
+        timeout: per-target seconds to wait. Default 900 (15 min).
+
+    Returns:
+        JSON-encoded dict:
+          {
+            "fired": {target: question_id, ...},
+            "results": {target: {"status": "answered"|"timeout"|"error",
+                                  "body": "<prose>"}, ...},
+            "fire_errors": {target: <error string>, ...}  # only if any
+          }
+
+        The slash command parses + renders this for the user.
+    """
+    import asyncio
+    import json as _json
+    import urllib.parse
+
+    from khimaira.server import monitor_tools as _mt
+
+    fired: dict[str, str] = {}
+    fire_errors: dict[str, str] = {}
+
+    # --- 1. Fire all questions sequentially (each call is fast — just
+    #        opens a question in the daemon; doesn't wait). ---
+    me_quoted = urllib.parse.quote(from_session_id)
+    for target in targets:
+        body = {"text": task, "target_session_id": target}
+        data = _mt._post(
+            f"/api/sessions/{me_quoted}/question", body, timeout=10.0
+        )
+        if isinstance(data, str):
+            # daemon returned an error string (down / 422 / etc.)
+            fire_errors[target] = data
+        elif isinstance(data, dict) and data.get("id"):
+            fired[target] = data["id"]
+        else:
+            fire_errors[target] = f"unexpected response: {data!r}"
+
+    # --- 2. asyncio.gather the per-target wait_for_answer calls. ---
+    async def _await_one(target: str, qid: str) -> tuple[str, dict]:
+        try:
+            body = await _mt.session_wait_for_answer(
+                from_session_id, qid, timeout=timeout
+            )
+            # Prose return shape:
+            #   "✅ answer received for q=<qid> (answered by <id>):\n\n<body>"
+            # OR
+            #   "khimaira-monitor http://...wait?timeout=<t> → HTTP 408:
+            #     No answer to <qid> within <t>s"
+            if "✅" in body:
+                return target, {"status": "answered", "body": body}
+            if "HTTP 408" in body:
+                return target, {"status": "timeout", "body": body}
+            return target, {"status": "error", "body": body}
+        except Exception as exc:  # noqa: BLE001
+            return target, {"status": "error", "body": f"exception: {exc}"}
+
+    results: dict[str, dict] = {}
+    if fired:
+        gathered = await asyncio.gather(
+            *(_await_one(t, q) for t, q in fired.items())
+        )
+        results = dict(gathered)
+
+    payload = {
+        "fired": fired,
+        "results": results,
+    }
+    if fire_errors:
+        payload["fire_errors"] = fire_errors
+
+    return _json.dumps(payload, indent=2)
+
+
+@mcp.tool()
 @logged_tool("session_incoming_questions")
 async def session_incoming_questions(session_id: str) -> str:
     """Open questions from OTHER sessions targeted at this one.
