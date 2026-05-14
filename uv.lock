@@ -1034,7 +1034,7 @@ provides-extras = ["all"]
 
 [[package]]
 name = "khimaira-transport"
-version = "0.1.0.dev0"
+version = "0.1.0"
 source = { editable = "shared/transport" }
 dependencies = [
     { name = "fastmcp" },
@@ -1049,7 +1049,7 @@ requires-dist = [
 
 [[package]]
 name = "khimaira-types"
-version = "0.1.0.dev0"
+version = "0.1.0"
 source = { editable = "shared/types" }
 dependencies = [
     { name = "pydantic" },

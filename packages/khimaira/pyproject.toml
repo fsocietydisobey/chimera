@@ -67,16 +67,16 @@ version-file = "src/khimaira/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/khimaira"]
-# Exclude observer_template from the packages= discovery — it's re-added
-# below via force-include. Without this exclusion, packages= picks up the
-# .py files inside observer_template AND force-include also adds them,
-# producing duplicate entries in the wheel that PyPI rejects with
-# "400 Invalid distribution file. ZIP archive not accepted: Duplicate
-# filename in local headers" (verified 2026-05-14 against TestPyPI).
-exclude = ["src/khimaira/attach/observer_template/**"]
 
-# Re-include observer_template via force-include — this is the only path
-# that picks up non-.py data files (the .pth in particular). Combined with
-# the exclude above, the files land in the wheel exactly once.
+# `packages=` traverses src/khimaira and picks up every .py file under
+# it — including the observer_template subtree's `khimaira_observer/__init__.py`.
+# But hatchling's default file selectors skip non-.py files, so the
+# `khimaira_observer.pth` (load-bearing for `khimaira attach` — it's
+# what tells Python to import the observer at venv startup) gets
+# dropped from the wheel. Force-including just the .pth fills that
+# specific gap without needing the v0.1.0-era exclude+full-force-include
+# dance that produced duplicate-entry wheels (PyPI rejects those with
+# "400 Invalid distribution file. ZIP archive not accepted: Duplicate
+# filename in local headers" — verified against TestPyPI 2026-05-14).
 [tool.hatch.build.targets.wheel.force-include]
-"src/khimaira/attach/observer_template" = "khimaira/attach/observer_template"
+"src/khimaira/attach/observer_template/khimaira_observer.pth" = "khimaira/attach/observer_template/khimaira_observer.pth"
