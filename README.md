@@ -52,14 +52,24 @@ in `~/.khimaira/models.yaml`.
 
 ---
 
-## Install — one MCP config line
+## Install
+
+**Quickest path — from PyPI** (live as of v0.1.0):
+
+```bash
+pip install khimaira
+```
+
+That gives you the ~65-tool native surface: orchestration, monitor,
+sessions, observer, dispatch, task sources. Then add khimaira as an
+MCP server in your editor:
 
 ```jsonc
 {
   "mcpServers": {
     "khimaira": {
-      "command": "uvx",
-      "args": ["khimaira", "mcp"]
+      "command": "khimaira",
+      "args": ["mcp"]
     }
   }
 }
@@ -70,7 +80,11 @@ Continue, custom). Restart the editor. khimaira self-configures on
 first connect — registers hooks, installs the supervisor, builds the
 dashboard.
 
-For shell-driven installs (or pinned profiles across many machines):
+**Full surface (~119 tools, including Séance / Specter / Scarlet / Sibyl)**:
+the sibling packages are squatted on PyPI under their bare names, so
+v0.1.0 ships only the khimaira core. The full sibling surface needs
+the git install (sibling tools land on PyPI as `khimaira-seance` etc.
+in v0.2.0):
 
 ```bash
 uvx --from git+https://github.com/fsocietydisobey/khimaira khimaira bootstrap \

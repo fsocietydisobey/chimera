@@ -226,14 +226,30 @@ a fourth in an afternoon using just the guide.
 
 ### Phase 3 — Open-source distribution  (1 week)
 
-- 3.1 PyPI package (decide name; bare `khimaira` is taken)
-- 3.2 README rewrite — lead with savings, frame as orchestration layer
-- 3.3 Community profile (`khimaira-profile.yaml` pointing at public repos)
+- 3.1 PyPI package ✅ **shipped 2026-05-14** (v0.1.0). Path A (3 packages):
+  `khimaira` + `khimaira-types` + `khimaira-transport`. Sibling packages
+  (`seance`/`specter`/`scarlet`/`sibyl`) are squatted on PyPI by unrelated
+  projects, so they'll ship in v0.2.0 under the `khimaira-` prefix
+  (e.g. `khimaira-seance`). Local package names stay; only the
+  distribution `name = ...` in each pyproject.toml differs.
+- 3.2 README rewrite — lead with savings, frame as orchestration layer ✅ (shipped 2026-05-13)
+- 3.3 Community profile (`khimaira-profile.yaml` pointing at public repos) ✅ (shipped earlier)
 - 3.4 Demo assets (GIFs + 3-minute walkthrough)
 
-**Done when**: `uvx khimaira mcp` works on a fresh laptop.
+**Done when**: ~~`uvx khimaira mcp` works on a fresh laptop.~~ ✅ — and
+now `pip install khimaira` also works (v0.1.0 on real PyPI).
 README pitches the editor-agnostic story. Someone who saw an HN post
 can install and see savings the same day.
+
+**v0.1.1 cleanup flagged** (per khimaira-13's publish notes): the
+observer_template currently has a workaround in `packages/khimaira/pyproject.toml`
+(`exclude` on packages= + force-include). Works but inelegant. Drop to
+a single inclusion mechanism if a cleaner hatchling pattern surfaces.
+
+**v0.2.0 scope**: sibling PyPI packages under `khimaira-` prefix
+(naming settled: `khimaira-seance`, `khimaira-specter`, `khimaira-scarlet`,
+`khimaira-sibyl`). Once published, `pip install khimaira[all]` could
+pull the full sibling surface — extras decision is open.
 
 ### Phase 4 — Stretch (do once 0-3 ship)
 
