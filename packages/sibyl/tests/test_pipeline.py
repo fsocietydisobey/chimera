@@ -215,7 +215,7 @@ def test_scribe_mcp_exposes_six_tools():
     ]
 
 
-def test_scribe_tools_register_under_prefix():
+def test_sibyl_tools_register_under_prefix():
     """khimaira's register_sibling_tools surfaces sibyl tools as sibyl_*."""
     from mcp.server.fastmcp import FastMCP
 
@@ -224,14 +224,14 @@ def test_scribe_tools_register_under_prefix():
     target = FastMCP("test-target")
     register_sibling_tools(target)
     tools = target._tool_manager.list_tools()
-    scribe_tools = sorted(t.name for t in tools if t.name.startswith("scribe_"))
-    assert scribe_tools == [
-        "scribe_list_active_recordings",
+    sibyl_tools = sorted(t.name for t in tools if t.name.startswith("sibyl_"))
+    assert sibyl_tools == [
+        "sibyl_list_active_recordings",
         "sibyl_process",
-        "scribe_record_start",
-        "scribe_record_stop",
-        "scribe_summarize",
-        "scribe_transcribe",
+        "sibyl_record_start",
+        "sibyl_record_stop",
+        "sibyl_summarize",
+        "sibyl_transcribe",
     ]
 
 

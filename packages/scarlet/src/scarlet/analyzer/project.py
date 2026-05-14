@@ -179,7 +179,42 @@ def _read_pyproject(project_path: Path) -> str | None:
 def _detect_project_type(
     project_path: Path, package_json: dict | None, pyproject: str | None
 ) -> str:
-    """Heuristic project type detection."""
+    """Heuristic project type detection — root signals trump nested ones.
+
+    `package_json` here is the MERGED view across the tree (root + up to
+    2 levels deep), so a Python workspace with an embedded SPA in
+    `apps/monitor-ui/` picks up Vite/React/redux from that subdir. That's
+    great for state_management/test_framework detection (you legitimately
+    DO have those libs in the project) but wrong for project_type: the
+    project itself is Python, the SPA is a subpart.
+
+    Fix (2026-05-14): check whether the ROOT has package.json. If it
+    doesn't, treat any pyproject.toml at root as the definitive signal —
+    project_type follows the Python framework, not the embedded SPA's.
+
+    Bug it prevented: khimaira workspace (root pyproject.toml + nested
+    apps/monitor-ui/package.json with vite+redux-toolkit+react) was
+    reporting `project_type="vite"` + `state_management="redux-toolkit"`,
+    misleading `khimaira-orient` and any other consumer of
+    `scarlet_analyze_project`.
+    """
+    has_root_package_json = (project_path / "package.json").exists()
+
+    # Pure-Python case: pyproject.toml at root, NO package.json at root.
+    # Subtree may still have package.jsons (embedded frontend), but the
+    # project's primary nature is Python.
+    if pyproject and not has_root_package_json:
+        if "fastapi" in pyproject:
+            return "fastapi"
+        if "django" in pyproject:
+            return "django"
+        if "flask" in pyproject:
+            return "flask"
+        return "python"
+
+    # JS-flavored: root package.json exists. Detect framework from the
+    # merged deps view (covers monorepos where the framework lib is in
+    # a subdir).
     if package_json:
         deps = {**package_json.get("dependencies", {}), **package_json.get("devDependencies", {})}
         if "next" in deps:
@@ -195,6 +230,8 @@ def _detect_project_type(
         if "svelte" in deps:
             return "svelte"
 
+    # Has pyproject.toml AND root package.json — rare; Python project
+    # that uses npm for build tools (e.g. tailwind). Treat as Python.
     if pyproject:
         if "fastapi" in pyproject:
             return "fastapi"
