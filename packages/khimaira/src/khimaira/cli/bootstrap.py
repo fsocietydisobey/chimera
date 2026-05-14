@@ -130,6 +130,19 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
             "`khimaira monitor watch` foreground supervisor."
         ),
     )
+    p_sync.add_argument(
+        "--auto-upgrade",
+        dest="auto_upgrade",
+        action="store_true",
+        help=(
+            "In site-packages mode (uvx / pip install), if PyPI has a "
+            "newer khimaira release, run `uv tool upgrade khimaira` or "
+            "`pip install -U khimaira` automatically without prompting. "
+            "Use in cron / non-interactive contexts; default is prompt "
+            "(interactive) or skip-with-hint (non-tty). No effect in "
+            "editable-install mode."
+        ),
+    )
     p_sync.set_defaults(func=_run_sync)
 
 
@@ -280,6 +293,7 @@ def _run_sync(args: argparse.Namespace) -> int:
         args.profile_obj,
         force=args.force,
         auto_restart_monitor=args.auto_restart,
+        auto_upgrade=args.auto_upgrade,
     )
 
     # Same persist behavior as bootstrap — running sync with an explicit

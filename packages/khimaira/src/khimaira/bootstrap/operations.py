@@ -1395,3 +1395,114 @@ def maybe_run_uv_sync(workspace_root: Path, deps_changed: bool) -> OpResult:
         status="updated",
         detail="workspace dependencies re-resolved",
     )
+
+
+# ---------------------------------------------------------------------------
+# PyPI upgrade — site-packages-mode sync
+# ---------------------------------------------------------------------------
+
+
+def check_and_upgrade_khimaira(
+    *,
+    auto_upgrade: bool = False,
+    prompt_fn=None,
+) -> OpResult:
+    """Site-packages branch of `khimaira sync`: check PyPI, upgrade if newer.
+
+    Behavior:
+      1. Read installed `khimaira.__version__`.
+      2. Fetch latest from PyPI.
+      3. If PyPI returns nothing (network error, etc.) → skipped.
+      4. If same or older → unchanged.
+      5. If newer:
+         - `auto_upgrade=True` → run the upgrade subprocess.
+         - `auto_upgrade=False` + interactive tty → prompt; user can
+           accept (run upgrade) or decline (skipped with suggestion).
+         - `auto_upgrade=False` + non-interactive (cron/pipe) →
+           skipped with explicit "rerun with --auto-upgrade" hint.
+
+    `prompt_fn` is injectable for tests (defaults to `input`).
+
+    Returns an OpResult with op="package-upgrade", target="khimaira".
+    """
+    import sys as _sys
+
+    from khimaira import __version__
+    from khimaira.bootstrap import install_mode
+
+    if prompt_fn is None:
+        prompt_fn = input
+
+    latest = install_mode.check_pypi_version("khimaira")
+    if latest is None:
+        return OpResult(
+            op="package-upgrade",
+            target="khimaira",
+            status="skipped",
+            detail="PyPI version check failed (offline or rate-limited?)",
+        )
+
+    if not install_mode.is_newer_version(__version__, latest):
+        return OpResult(
+            op="package-upgrade",
+            target="khimaira",
+            status="unchanged",
+            detail=f"already on {__version__} (latest: {latest})",
+            meta={"current": __version__, "latest": latest},
+        )
+
+    # Newer release available — decide whether to upgrade.
+    tool = install_mode.detect_upgrade_tool()
+    siblings = install_mode.discover_installed_siblings()
+    packages = ["khimaira", *siblings]
+
+    if not auto_upgrade:
+        # Only prompt when stdin is an actual tty — cron/pipe should
+        # skip rather than block forever waiting on input.
+        if not _sys.stdin.isatty():
+            return OpResult(
+                op="package-upgrade",
+                target="khimaira",
+                status="skipped",
+                detail=(
+                    f"newer release available: {__version__} → {latest}. "
+                    f"Rerun with `khimaira sync --auto-upgrade` to apply."
+                ),
+                meta={"current": __version__, "latest": latest, "tool": tool},
+            )
+        try:
+            reply = prompt_fn(
+                f"khimaira {__version__} → {latest} available. Upgrade now? [Y/n] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            reply = "n"
+        if reply and reply not in ("y", "yes", ""):
+            return OpResult(
+                op="package-upgrade",
+                target="khimaira",
+                status="skipped",
+                detail=f"upgrade declined by user (latest: {latest})",
+                meta={"current": __version__, "latest": latest},
+            )
+
+    ok, output = install_mode.run_upgrade(tool, packages)
+    if not ok:
+        return OpResult(
+            op="package-upgrade",
+            target="khimaira",
+            status="failed",
+            detail=f"upgrade subprocess failed: {output[:300]}",
+            meta={"current": __version__, "latest": latest, "tool": tool},
+        )
+    return OpResult(
+        op="package-upgrade",
+        target="khimaira",
+        status="updated",
+        detail=f"upgraded {__version__} → {latest} via {tool}",
+        meta={
+            "current": __version__,
+            "latest": latest,
+            "tool": tool,
+            "packages_upgraded": packages,
+        },
+    )

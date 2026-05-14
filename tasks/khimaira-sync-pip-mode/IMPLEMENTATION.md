@@ -1,10 +1,9 @@
 # khimaira sync — pip-install mode awareness (v1.2)
 
-**Status**: spec landed 2026-05-14 by `chimera-extension` (2cac13b6) after Joseph flagged the OSS-launch gap.
-**Phase**: NORTH_STAR Phase 3 follow-up (gates the install-and-stay-current story for pip users).
-**Owner**: TBD — handed off to khimaira-6 via notice.
+**Status**: 🟢 **shipped 2026-05-14** by `khimaira-6` — see implementation in `packages/khimaira/src/khimaira/bootstrap/install_mode.py`, the new site-packages branch in `runner.run_sync`, and the `--auto-upgrade` CLI flag. Spec landed 2026-05-14 by `chimera-extension` (2cac13b6).
+**Phase**: NORTH_STAR Phase 3 follow-up (gates the install-and-stay-current story for pip users). 🟢 complete.
 **Last reviewed**: 2026-05-14
-**Estimated effort**: ~1 day.
+**Estimated effort (actual)**: ~2h end-to-end (mode-detection + upgrade orchestration + CLI flag + 30 tests).
 
 > **🎯 Goal: make `khimaira sync` do the right thing for users who installed via `pip install khimaira` or `uvx khimaira`, not just for editable-install dev contributors.**
 
@@ -116,13 +115,17 @@ This task assumes the community profile exists (or lands in the same shipment). 
    # → checks PyPI, upgrades if needed, reapplies profile
    ```
 
-## Open questions
+## Open questions — resolved 2026-05-14 (khimaira-6 picking up implementation)
 
-1. **Detection precision.** Editable installs put the package under `<project>/packages/khimaira/src/khimaira`. PyPI installs put it under `<venv>/lib/python3.X/site-packages/khimaira`. The detection logic above checks for "site-packages" in path parts — robust but worth a unit test against both shapes including the workspace member case.
-2. **uvx vs pip detection.** A user might have installed via `uvx khimaira` (uses `uv tool install` under the hood) or via `pip install khimaira` (in a regular venv). The upgrade command differs (`uv tool upgrade khimaira` vs `pip install -U khimaira`). Detect by introspecting the parent of `sys.executable`, or by checking for `uv` on PATH and falling back. Worth getting right.
-3. **Auto-upgrade vs prompt.** Should `khimaira sync` auto-run the pip upgrade, or prompt? My recommendation: prompt by default, `--auto-upgrade` flag for cron mode. Consistent with `--auto-restart` deferral for monitor (currently suggestion-only too).
-4. **Sibling-package upgrades.** v0.1.0 published `khimaira`, `khimaira-types`, `khimaira-transport`. v0.2.0 will add `khimaira-seance`, `khimaira-specter`, `khimaira-scarlet`, `khimaira-sibyl`. The `pip install -U khimaira` command would only upgrade khimaira itself — does pip transitively upgrade pinned siblings, or do we need to explicitly target each? Probably needs a `pip install -U khimaira khimaira-types khimaira-transport ...` style invocation, or a meta-package.
-5. **Hook integration.** Once published `khimaira` is older than what's on PyPI, does the user see a warning at SessionStart? Probably yes — small line: "🔁 khimaira 0.1.0 → 0.2.1 available — run `khimaira sync` to upgrade." Cheap win, but defer to v1.3.
+1. **Detection precision** — RESOLVED. Use `Path(khimaira.__file__).resolve()` and check whether `"site-packages"` appears in `parts`. Verified against the editable case (`.../packages/khimaira/src/khimaira/__init__.py` — no site-packages part) and the wheel case (`.../site-packages/khimaira/__init__.py`). uvx case also matches (`~/.local/share/uv/tools/khimaira/lib/python3.X/site-packages/khimaira/...`). Unit-tested both shapes.
+
+2. **uvx vs pip distinction** — RESOLVED. Detect via `sys.executable` — if `uv/tools/khimaira/` appears in the path, the install came from `uvx`/`uv tool install` → use `uv tool upgrade khimaira`. Otherwise → `pip install -U khimaira`. No PATH probing needed (cheap, deterministic).
+
+3. **Auto-upgrade vs prompt** — RESOLVED. Prompt by default; `--auto-upgrade` flag for cron mode. Mirrors `--auto-restart` deferral pattern. Default no-interaction (e.g. inside a shell pipeline or when stdin isn't a tty) falls back to no-op + suggestion (don't block).
+
+4. **Sibling-package upgrades** — RESOLVED. Probe `importlib.metadata.distributions()` for installed `khimaira-*` distributions; pass the discovered list to the upgrade command explicitly. Avoids the `pip install -U 'khimaira[all]'` foot-gun (which would install missing siblings even when the user didn't ask for them). Concretely: if user has `khimaira` + `khimaira-types` + `khimaira-transport` + `khimaira-seance`, run `pip install -U khimaira khimaira-types khimaira-transport khimaira-seance`. Upgrade only what's already there.
+
+5. **Hook integration (SessionStart upgrade-available warning)** — DEFERRED to v1.3. Cheap win but out of scope for the install-and-stay-current MVP. Open follow-up task to add after this lands.
 
 ## Validation hooks (how to know it works)
 

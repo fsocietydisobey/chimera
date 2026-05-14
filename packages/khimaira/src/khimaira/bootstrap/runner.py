@@ -29,6 +29,7 @@ from pathlib import Path
 
 from khimaira.log import get_logger
 from khimaira.bootstrap import checks
+from khimaira.bootstrap import install_mode
 from khimaira.bootstrap import operations as ops
 from khimaira.bootstrap.schema import Profile
 
@@ -137,27 +138,86 @@ def run_bootstrap(profile: Profile, *, force: bool = False) -> RunReport:
 
 
 def run_sync(
-    profile: Profile, *, force: bool = False, auto_restart_monitor: bool = False
+    profile: Profile,
+    *,
+    force: bool = False,
+    auto_restart_monitor: bool = False,
+    auto_upgrade: bool = False,
 ) -> RunReport:
-    """Ongoing sync — pulls every declared repo + re-applies the manifest.
+    """Ongoing sync — mode-aware. See module docstring for the editable path.
 
-    Order (task #66):
-      1. dotfiles git pull
-      2. sibling repos git fetch + ff-only merge
-      3. uv sync --all-packages (only if any pulled repo touched
-         pyproject.toml or uv.lock)
-      4. apply symlinks (idempotent — picks up new entries added since
-         last bootstrap)
-      5. re-register MCP servers (idempotent at this layer)
-      6. re-apply Claude Code hooks (necessary on sync because a
-         khimaira pull may have shipped new hook modules)
-      7. report unpushed-commits for every synced repo (report-only;
-         sync never auto-pushes)
+    Branches on install mode at the top (task #v1.2):
+
+      - **site-packages mode** (`uvx khimaira` / `pip install khimaira`):
+        skip git-pull / uv-sync ops (no workspace to manage); check PyPI
+        for a newer release + optionally upgrade in-place; then re-apply
+        the profile bits that work the same regardless of mode (symlinks,
+        MCP register, hooks).
+
+      - **editable mode** (contributor workflow): existing v1 behavior —
+        dotfiles pull, sibling repo pulls, uv sync, install re-run,
+        symlinks, MCP, hooks, monitor freshness check.
+
+    `auto_upgrade=True` skips the interactive prompt in site-packages
+    mode and applies the upgrade unconditionally (use in cron). Has no
+    effect in editable mode.
 
     All operations are idempotent — re-running on a no-change machine
     produces all-`unchanged` results.
     """
     report = RunReport()
+    mode = install_mode.detect_install_mode()
+
+    # --- Site-packages mode: PyPI-based upgrade flow ---
+    if mode == "site-packages":
+        # No dotfiles git-pull or sibling git-pull in this mode — those
+        # ops assume a workspace checkout. Apply only the symmetric
+        # parts of the pipeline.
+        report.results.append(
+            ops.check_and_upgrade_khimaira(auto_upgrade=auto_upgrade)
+        )
+
+        # Apply symlinks IFF the user has a dotfiles repo declared — for
+        # community-profile users without dotfiles, this is a no-op.
+        if profile.dotfiles:
+            r = ops.sync_dotfiles(profile.dotfiles)
+            report.results.append(r)
+            if r.status != "failed":
+                dotfiles_root = Path(
+                    os.path.expanduser(profile.dotfiles.path)
+                ).resolve()
+                if dotfiles_root.is_dir():
+                    for entry in profile.dotfiles.symlinks:
+                        report.results.append(
+                            ops.apply_symlink(entry, dotfiles_root)
+                        )
+
+        # Re-register MCP servers + reconcile drift — works the same in
+        # either mode (operates on Claude Code's settings, not the repo).
+        for mcp in profile.mcp_servers:
+            report.results.append(ops.register_mcp(mcp, force=force))
+        profile_mcp_names = {m.name for m in profile.mcp_servers}
+        report.results.extend(ops.reconcile_mcp_drift(profile_mcp_names))
+
+        # Re-apply hooks if requested — the hook commands use
+        # `python -m khimaira.hooks.<name>`, which resolves against
+        # whichever khimaira is on $PATH (the upgraded one if we just
+        # upgraded).
+        if profile.install_claude_hooks:
+            report.results.append(ops.install_claude_hooks())
+
+        # Audit-log this run for future cross-machine comparisons.
+        ops.log_sync_event(
+            "sync-run",
+            "all",
+            {
+                "mode": "site-packages",
+                "had_failures": report.had_failures,
+            },
+        )
+        return report
+
+    # --- Editable mode: existing v1 pipeline (unchanged) ---
 
     # --- 1. dotfiles pull ---
     if profile.dotfiles:
@@ -363,6 +423,51 @@ def check_sync(profile: Profile) -> RunReport:
     fit together via `khimaira doctor` (which calls both).
     """
     report = RunReport()
+    mode = install_mode.detect_install_mode()
+
+    # --- Site-packages mode preview: PyPI version comparison only ---
+    if mode == "site-packages":
+        from khimaira import __version__
+
+        latest = install_mode.check_pypi_version("khimaira")
+        if latest is None:
+            report.results.append(
+                ops.OpResult(
+                    op="package-upgrade",
+                    target="khimaira",
+                    status="skipped",
+                    detail="PyPI version check failed (offline?)",
+                )
+            )
+        elif install_mode.is_newer_version(__version__, latest):
+            report.results.append(
+                ops.OpResult(
+                    op="package-upgrade",
+                    target="khimaira",
+                    status="updated",
+                    detail=f"would upgrade {__version__} → {latest}",
+                    meta={"current": __version__, "latest": latest},
+                )
+            )
+        else:
+            report.results.append(
+                ops.OpResult(
+                    op="package-upgrade",
+                    target="khimaira",
+                    status="unchanged",
+                    detail=f"current {__version__} matches latest {latest}",
+                    meta={"current": __version__, "latest": latest},
+                )
+            )
+
+        # MCP + hooks drift check still applies in site-packages mode.
+        for mcp in profile.mcp_servers:
+            report.results.append(checks.check_mcp(mcp))
+        if profile.install_claude_hooks:
+            report.results.append(checks.check_claude_hooks())
+        return report
+
+    # --- Editable mode preview (existing path) ---
 
     # --- 1. dotfiles clone presence ---
     if profile.dotfiles:
@@ -436,6 +541,7 @@ def summarize_sync(report: RunReport) -> str:
     deps_refreshed = False
     unpushed_total = 0
     repos_with_unpushed = 0
+    upgrade_summary: str | None = None
 
     for r in report.results:
         if r.op == "repo-pull" and r.status == "updated":
@@ -446,8 +552,17 @@ def summarize_sync(report: RunReport) -> str:
         elif r.op == "unpushed-check" and r.status == "updated":
             unpushed_total += r.meta.get("unpushed_count", 0)
             repos_with_unpushed += 1
+        elif r.op == "package-upgrade":
+            current = r.meta.get("current")
+            latest = r.meta.get("latest")
+            if r.status == "updated" and current and latest:
+                upgrade_summary = f"khimaira {current} → {latest}"
+            elif r.status == "skipped" and current and latest:
+                upgrade_summary = f"upgrade available: {current} → {latest} (skipped)"
 
     parts: list[str] = []
+    if upgrade_summary:
+        parts.append(upgrade_summary)
     if commits_pulled or repos_pulled:
         parts.append(f"{commits_pulled} commit(s) across {repos_pulled} repo(s)")
     if deps_refreshed:
