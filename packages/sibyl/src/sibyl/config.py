@@ -1,10 +1,10 @@
-"""Configuration for Meeting Scribe."""
+"""Configuration for Sibyl."""
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_OUTPUT_DIR = Path.home() / ".local" / "share" / "meeting-scribe"
+DEFAULT_OUTPUT_DIR = Path.home() / ".local" / "share" / "sibyl"
 DEFAULT_SAMPLE_RATE = 16_000
 DEFAULT_CHANNELS = 1
 
@@ -32,5 +32,5 @@ def load_config() -> Config:
     return Config(
         gemini_api_key=os.environ.get("GOOGLE_AI_API_KEY", ""),
         gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
-        output_dir=Path(os.environ.get("SCRIBE_OUTPUT_DIR", DEFAULT_OUTPUT_DIR)),
+        output_dir=Path(os.environ.get("SIBYL_OUTPUT_DIR", DEFAULT_OUTPUT_DIR)),
     )

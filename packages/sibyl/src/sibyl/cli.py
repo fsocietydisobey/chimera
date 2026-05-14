@@ -1,4 +1,4 @@
-"""CLI entry point for Meeting Scribe."""
+"""CLI entry point for Sibyl."""
 
 import argparse
 import asyncio
@@ -7,17 +7,17 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from scribe.config import load_config
-from scribe.graph import process_meeting
-from scribe.live import live_transcribe
-from scribe.recorder import record_meeting
-from scribe.state import MeetingState
+from sibyl.config import load_config
+from sibyl.graph import process_meeting
+from sibyl.live import live_transcribe
+from sibyl.recorder import record_meeting
+from sibyl.state import MeetingState
 
 
 def _print_results(result: MeetingState) -> None:
     """Pretty-print pipeline results to stdout."""
     print("\n" + "=" * 60)
-    print("MEETING SCRIBE — Results")
+    print("SIBYL — Results")
     print("=" * 60)
 
     if result.get("transcript"):
@@ -126,7 +126,7 @@ def cmd_list(_args: argparse.Namespace) -> None:
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        prog="meeting-scribe",
+        prog="sibyl",
         description="Record meetings and process with Gemini AI",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)

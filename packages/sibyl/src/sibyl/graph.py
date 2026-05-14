@@ -13,12 +13,12 @@ from typing import cast
 
 from langgraph.graph import StateGraph
 
-from scribe.log import get_tracer
-from scribe.nodes.emotion import detect_emotions
-from scribe.nodes.extract import extract_actions
-from scribe.nodes.summarize import summarize
-from scribe.nodes.transcribe import transcribe
-from scribe.state import MeetingState
+from sibyl.log import get_tracer
+from sibyl.nodes.emotion import detect_emotions
+from sibyl.nodes.extract import extract_actions
+from sibyl.nodes.summarize import summarize
+from sibyl.nodes.transcribe import transcribe
+from sibyl.state import MeetingState
 
 
 def _route_after_transcribe(state: MeetingState) -> list[str]:

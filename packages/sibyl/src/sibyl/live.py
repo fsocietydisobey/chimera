@@ -22,14 +22,14 @@ from google.genai import types
 
 import logging
 
-from scribe.config import Config
-from scribe.recorder import (
+from sibyl.config import Config
+from sibyl.recorder import (
     _get_default_monitor,
     _get_default_source,
     _get_device_index,
 )
 
-log = logging.getLogger("meeting_scribe.live")
+log = logging.getLogger("sibyl.live")
 
 SAMPLE_RATE = 16_000  # Gemini Live API requires 16kHz input
 CHUNK_SECONDS = 1.0  # Send audio every 1s

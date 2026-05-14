@@ -4,8 +4,8 @@ Drop-in callback handler that traces nodes, tools, LLM calls, retries, and error
 No manual log calls needed anywhere. Configure once, reuse across projects.
 
 Usage:
-    uv run meeting-scribe record -p                    # INFO: nodes, tools, timing
-    LOG_LEVEL=DEBUG uv run meeting-scribe record -p    # DEBUG: + inputs, outputs, tokens
+    uv run sibyl record -p                    # INFO: nodes, tools, timing
+    LOG_LEVEL=DEBUG uv run sibyl record -p    # DEBUG: + inputs, outputs, tokens
 
 Reuse in any LangGraph project:
     from your_project.log import get_tracer

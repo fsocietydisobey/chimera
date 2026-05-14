@@ -13,13 +13,13 @@ of total pipeline cost for meetings where emotional tone isn't relevant.
 import json
 import time
 
-from scribe.nodes import (
+from sibyl.nodes import (
     get_audio_model,
     get_client,
     gemini_usage_to_tokens,
     record_node_usage,
 )
-from scribe.state import MeetingState
+from sibyl.state import MeetingState
 
 
 async def detect_emotions(state: MeetingState) -> dict:

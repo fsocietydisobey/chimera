@@ -1,4 +1,4 @@
-"""Shared infrastructure for scribe pipeline nodes.
+"""Shared infrastructure for sibyl pipeline nodes.
 
 Three responsibilities consolidated here so each node stays small:
 
@@ -43,7 +43,7 @@ DEFAULT_AUDIO_MODEL = "gemini-2.0-flash"
 def get_audio_model() -> str:
     """Audio-capable model for transcribe + emotion. Override via env."""
     return os.environ.get(
-        "SCRIBE_AUDIO_MODEL",
+        "SIBYL_AUDIO_MODEL",
         os.environ.get("GEMINI_MODEL", DEFAULT_AUDIO_MODEL),
     )
 
@@ -104,16 +104,16 @@ async def record_node_usage(
 ) -> None:
     """Record one Gemini call into khimaira's usage.jsonl.
 
-    Wraps khimaira.usage.get_recorder() so scribe doesn't have to know
+    Wraps khimaira.usage.get_recorder() so sibyl doesn't have to know
     the recorder API internals. Records `mode="explicit-tier"` because
-    scribe is choosing an audio-capable model on purpose (not via the
+    sibyl is choosing an audio-capable model on purpose (not via the
     classifier/pool-router auto path).
 
     `role` is "transcribe", "emotion", "summarize", or "extract" — so
     `khimaira usage savings --by role` shows per-meeting per-node cost.
 
     Defensive: never raises. Failed usage recording must not break the
-    pipeline. If khimaira isn't importable (rare — scribe is a workspace
+    pipeline. If khimaira isn't importable (rare — sibyl is a workspace
     sibling so it should always be), this is a no-op.
     """
     try:

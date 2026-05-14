@@ -9,11 +9,11 @@ gemini-2.5-flash, much cheaper than the audio-capable model that
 transcribe + emotion need.
 
 Usage is recorded by khimaira's delegate path with `mode="auto"`,
-so the scribe summarize call shows up in `khimaira usage savings`
+so the sibyl summarize call shows up in `khimaira usage savings`
 alongside other auto-mode dispatches.
 """
 
-from scribe.state import MeetingState
+from sibyl.state import MeetingState
 
 
 _PROMPT = (

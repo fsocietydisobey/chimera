@@ -7,7 +7,7 @@ SIGINT, saving a WAV file. For MCP-driven control we want to:
   - stop the recording from a separate tool call (different turn)
   - retrieve the saved file path
 
-Approach: spawn `python -m scribe.cli record --output <path>` as a
+Approach: spawn `python -m sibyl.cli record --output <path>` as a
 subprocess, track its PID in a module-level dict keyed by the
 recording_id, send SIGINT on stop, wait briefly for the output file to
 materialize.
@@ -38,7 +38,7 @@ class _ActiveRecording:
 
     Carries transcription hints (known_speakers, accent_hint) the caller
     declared at record_start time. They flow back out via record_stop's
-    return dict so the agent can pass them straight to scribe_process —
+    return dict so the agent can pass them straight to sibyl_process —
     no re-typing the participant list after the meeting, and no need to
     persist names anywhere in khimaira itself.
     """
@@ -59,7 +59,7 @@ _active: dict[str, _ActiveRecording] = {}
 def _default_output_dir() -> Path:
     """Where recordings land by default. Matches the recorder's existing
     convention; keeps back-compat with the standalone CLI's files."""
-    return Path.home() / ".local" / "share" / "meeting-scribe"
+    return Path.home() / ".local" / "share" / "sibyl"
 
 
 def start_recording(
@@ -73,7 +73,7 @@ def start_recording(
 
     Args:
         output_path: WAV destination; defaults to a timestamped path
-            in ~/.local/share/meeting-scribe/.
+            in ~/.local/share/sibyl/.
         known_speakers: List of expected participant names. Stored on
             the recording so `record_stop` can return them and the
             caller can pass them straight to `process` for accurate
@@ -99,11 +99,11 @@ def start_recording(
     recording_id = uuid.uuid4().hex[:12]
     started_at = datetime.now(timezone.utc).isoformat()
 
-    # Spawn `python -m scribe.cli record --output <path>` so the existing
+    # Spawn `python -m sibyl.cli record --output <path>` so the existing
     # CLI handles device detection + SIGINT-to-save. Detached process
     # group so it doesn't inherit Claude Code's signal handlers.
     proc = subprocess.Popen(
-        [sys.executable, "-m", "scribe.cli", "record", "--output", str(out)],
+        [sys.executable, "-m", "sibyl.cli", "record", "--output", str(out)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
@@ -176,7 +176,7 @@ def stop_recording(recording_id: str, *, wait_s: float = 10.0) -> dict:
     _active.pop(recording_id, None)
 
     # Echo back the transcription hints the caller declared at start time
-    # so the agent can pipe them straight into scribe_process — no need
+    # so the agent can pipe them straight into sibyl_process — no need
     # for the user to retype the participant list.
     return {
         "recording_id": recording_id,

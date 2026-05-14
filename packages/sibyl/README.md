@@ -1,4 +1,12 @@
-# Meeting Scribe
+# Sibyl
+
+> **Sibyl now ships inside [khimaira](https://github.com/fsocietydisobey/khimaira)**
+> as a workspace member at `packages/sibyl/`. Its tools are
+> re-registered on khimaira's MCP server under source-prefixed names
+> (`mcp__khimaira__sibyl_record_start`, etc.). The standalone
+> `sibyl serve` path below still works for backward compatibility.
+
+> Named for the Sibyl of Cumae, whose body withered with age until only her voice remained, preserved in the Sibylline Books. The package captures spoken word and preserves its meaning after the moment is gone — same shape, modern medium.
 
 Record meeting audio, then transcribe, summarize, extract action items, and detect speaker emotions using Gemini AI — orchestrated by a LangGraph pipeline. Supports both batch processing and real-time live transcription via the Gemini Live API.
 
@@ -51,8 +59,8 @@ Streams audio to Gemini's Live API over WebSocket in real-time. Transcription ap
 ### Install
 
 ```bash
-git clone https://github.com/fsocietydisobey/meeting-scribe.git
-cd meeting-scribe
+git clone https://github.com/fsocietydisobey/sibyl.git
+cd sibyl
 uv sync
 ```
 
@@ -63,13 +71,13 @@ export GOOGLE_AI_API_KEY="your-api-key-here"
 
 # Optional
 export GEMINI_MODEL="gemini-2.0-flash"                       # Model for batch processing
-export SCRIBE_OUTPUT_DIR="~/.local/share/meeting-scribe"     # Where recordings are saved
+export SIBYL_OUTPUT_DIR="~/.local/share/sibyl"     # Where recordings are saved
 
 # LangSmith tracing (optional — traces LangGraph pipeline)
 export LANGSMITH_TRACING=true
 export LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 export LANGSMITH_API_KEY="your-langsmith-key"
-export LANGSMITH_PROJECT="meeting-scribe"
+export LANGSMITH_PROJECT="sibyl"
 
 # Logging
 export LOG_LEVEL=INFO    # INFO (default) or DEBUG for verbose output
@@ -80,7 +88,7 @@ export LOG_LEVEL=INFO    # INFO (default) or DEBUG for verbose output
 ### Live transcription (real-time)
 
 ```bash
-uv run meeting-scribe live
+uv run sibyl live
 ```
 
 Streams audio to Gemini 3.1 Flash Live via WebSocket. Transcription tokens appear in your terminal as they're spoken. Press `Ctrl+C` to stop — audio is saved to a WAV file.
@@ -88,7 +96,7 @@ Streams audio to Gemini 3.1 Flash Live via WebSocket. Transcription tokens appea
 ### Live transcription + full analysis
 
 ```bash
-uv run meeting-scribe live -s
+uv run sibyl live -s
 ```
 
 Same as `live`, but after you stop, runs the full LangGraph pipeline to generate a summary, action items, decisions, and emotion analysis.
@@ -96,7 +104,7 @@ Same as `live`, but after you stop, runs the full LangGraph pipeline to generate
 ### Record a meeting (batch)
 
 ```bash
-uv run meeting-scribe record
+uv run sibyl record
 ```
 
 Records from both system audio monitor and mic simultaneously, mixed into one mono WAV. Press `Ctrl+C` to stop.
@@ -104,7 +112,7 @@ Records from both system audio monitor and mic simultaneously, mixed into one mo
 ### Record and process immediately
 
 ```bash
-uv run meeting-scribe record -p
+uv run sibyl record -p
 ```
 
 Records, then runs the full LangGraph pipeline when you stop.
@@ -112,7 +120,7 @@ Records, then runs the full LangGraph pipeline when you stop.
 ### Process an existing recording
 
 ```bash
-uv run meeting-scribe process path/to/meeting.wav
+uv run sibyl process path/to/meeting.wav
 ```
 
 Runs the LangGraph pipeline on any WAV file.
@@ -120,7 +128,7 @@ Runs the LangGraph pipeline on any WAV file.
 ### List recordings
 
 ```bash
-uv run meeting-scribe list
+uv run sibyl list
 ```
 
 Shows all recordings with size and processing status.
@@ -141,7 +149,7 @@ Shows all recordings with size and processing status.
 Results are printed to stdout and saved as a JSON file alongside the WAV:
 
 ```
-~/.local/share/meeting-scribe/
+~/.local/share/sibyl/
   meeting_20260402_140000.wav      # Audio
   meeting_20260402_140000.json     # Full results (all fields below)
 ```
@@ -197,7 +205,7 @@ Meeting between Joseph and Mark to discuss API redesign progress...
 
 ## Audio Sources
 
-Meeting Scribe captures audio via PipeWire's PulseAudio compatibility layer. It dynamically detects your current default devices using `pactl`:
+Sibyl captures audio via PipeWire's PulseAudio compatibility layer. It dynamically detects your current default devices using `pactl`:
 
 | Source | What it captures | How it's detected |
 |---|---|---|
@@ -214,7 +222,7 @@ pactl list short sinks
 
 ## Speaker Identification
 
-Meeting Scribe prompts Gemini to learn speaker names from introductions. If participants say their names early in the meeting:
+Sibyl prompts Gemini to learn speaker names from introductions. If participants say their names early in the meeting:
 
 ```
 Joseph: Let's get started. I'm Joseph, PM on the platform team.
@@ -255,16 +263,16 @@ src/meeting_scribe/
 
 ## Debugging & Tracing
 
-Meeting Scribe includes a built-in pipeline tracer that prints node execution, tool calls, LLM activity, retries, and errors directly to your terminal — no external dashboard required.
+Sibyl includes a built-in pipeline tracer that prints node execution, tool calls, LLM activity, retries, and errors directly to your terminal — no external dashboard required.
 
 ### Local tracing (terminal)
 
 ```bash
 # INFO — node names, timing, input/output keys, parallel detection
-uv run meeting-scribe record -p
+uv run sibyl record -p
 
 # DEBUG — adds input/output values, LLM model info, tool args, final state
-LOG_LEVEL=DEBUG uv run meeting-scribe record -p
+LOG_LEVEL=DEBUG uv run sibyl record -p
 ```
 
 **INFO output:**
@@ -305,7 +313,7 @@ For the full visual trace experience, set these env vars and LangGraph traces au
 export LANGSMITH_TRACING=true
 export LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 export LANGSMITH_API_KEY="your-langsmith-key"
-export LANGSMITH_PROJECT="meeting-scribe"
+export LANGSMITH_PROJECT="sibyl"
 ```
 
 Both local and LangSmith tracing can run simultaneously.

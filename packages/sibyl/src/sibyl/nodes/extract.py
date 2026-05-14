@@ -7,7 +7,7 @@ usage with `mode="auto"` so it lands in `khimaira usage savings`.
 
 import json
 
-from scribe.state import MeetingState
+from sibyl.state import MeetingState
 
 
 _PROMPT = (

@@ -1,4 +1,4 @@
-"""Scribe MCP tools — drive the meeting pipeline from any Claude Code session.
+"""Sibyl MCP tools — drive the meeting pipeline from any Claude Code session.
 
 Tools (all surface under `mcp__khimaira__scribe_*` via khimaira's
 sibling-tools registry):
@@ -28,12 +28,12 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from scribe import recording_control
-from scribe.graph import process_meeting
-from scribe.nodes.transcribe import transcribe as transcribe_node
+from sibyl import recording_control
+from sibyl.graph import process_meeting
+from sibyl.nodes.transcribe import transcribe as transcribe_node
 
 
-mcp = FastMCP("scribe")
+mcp = FastMCP("sibyl")
 
 
 def _parse_speakers(raw: str) -> list[str]:
@@ -60,7 +60,7 @@ async def record_start(
     Returns a JSON-shaped status block with `recording_id`, `output_path`,
     and the transcription hints you declared. Pass the `recording_id` to
     `record_stop` when the meeting ends — `record_stop` echoes your hints
-    back so the agent can pipe them into `scribe_process` automatically.
+    back so the agent can pipe them into `sibyl_process` automatically.
 
     The participant names you supply are NEVER persisted by khimaira —
     they live only in-memory for the duration of the recording, get
@@ -68,7 +68,7 @@ async def record_start(
 
     Args:
         output_path: Optional WAV destination. Default:
-            ~/.local/share/meeting-scribe/meeting_<timestamp>.wav.
+            ~/.local/share/sibyl/meeting_<timestamp>.wav.
         known_speakers: Comma-separated participant names — e.g.
             "Alice, Bob, Charlie". When provided, transcribe filters
             voices that aren't on the list (background office workers,
@@ -105,7 +105,7 @@ async def record_start(
         f"{hints_block}"
         f"\nCall `scribe_record_stop(recording_id={info['recording_id']!r})` "
         f"when the meeting ends. Stop will echo your participant list + "
-        f"accent so you can pipe them into `scribe_process` without "
+        f"accent so you can pipe them into `sibyl_process` without "
         f"retyping."
     )
 
@@ -117,7 +117,7 @@ async def record_stop(recording_id: str) -> str:
     SIGINTs the recorder subprocess (clean stop + save), waits up to
     10s for the WAV file to finalize. Echoes back the transcription
     hints (participant list, accent, task_id) the caller declared at
-    start time so the agent can pipe them straight into `scribe_process`.
+    start time so the agent can pipe them straight into `sibyl_process`.
 
     Args:
         recording_id: ID returned by `record_start`.
@@ -142,7 +142,7 @@ async def record_stop(recording_id: str) -> str:
         process_args.append(f"accent_hint={accent!r}")
     if task:
         process_args.append(f"task_id={task!r}")
-    process_call = "scribe_process(" + ", ".join(process_args) + ")"
+    process_call = "sibyl_process(" + ", ".join(process_args) + ")"
 
     echoed = ""
     if speakers:
@@ -278,8 +278,8 @@ async def summarize(transcript: str, task_id: str = "") -> str:
     """
     if not transcript.strip():
         return "❌ empty transcript"
-    from scribe.nodes.extract import extract_actions
-    from scribe.nodes.summarize import summarize as summarize_node
+    from sibyl.nodes.extract import extract_actions
+    from sibyl.nodes.summarize import summarize as summarize_node
 
     state = {
         "audio_path": "",

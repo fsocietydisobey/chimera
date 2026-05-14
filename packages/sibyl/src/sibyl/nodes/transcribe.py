@@ -2,14 +2,14 @@
 
 import time
 
-from scribe.nodes import (
+from sibyl.nodes import (
     get_audio_model,
     get_client,
     gemini_usage_to_tokens,
     record_node_usage,
     upload_audio_once,
 )
-from scribe.state import MeetingState
+from sibyl.state import MeetingState
 
 
 def _build_prompt(known_speakers: list[str], accent_hint: str) -> str:

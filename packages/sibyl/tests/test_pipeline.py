@@ -1,4 +1,4 @@
-"""Tests for the refactored scribe pipeline.
+"""Tests for the refactored sibyl pipeline.
 
 Verifies the three key claims of the 2026-05-13 integration:
   1. Audio is uploaded ONCE per pipeline run, referenced by both
@@ -57,7 +57,7 @@ def mock_gemini():
         return_value=_fake_response("hi from gemini")
     )
 
-    with patch("scribe.nodes.genai.Client", return_value=fake_client):
+    with patch("sibyl.nodes.genai.Client", return_value=fake_client):
         yield fake_client
 
 
@@ -66,7 +66,7 @@ def mock_gemini():
 
 async def test_transcribe_uploads_and_returns_text(mock_gemini, tmp_path):
     """Transcribe uses Files API (upload once) + returns transcript + file name."""
-    from scribe.nodes.transcribe import transcribe
+    from sibyl.nodes.transcribe import transcribe
 
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"FAKE_WAV_DATA")
@@ -87,7 +87,7 @@ async def test_transcribe_uploads_and_returns_text(mock_gemini, tmp_path):
 
 async def test_emotion_disabled_returns_stub(mock_gemini):
     """with_emotions=False → emotion node returns empty stub, doesn't hit Gemini."""
-    from scribe.nodes.emotion import detect_emotions
+    from sibyl.nodes.emotion import detect_emotions
 
     state = {
         "transcript": "Joseph: Good morning.",
@@ -103,7 +103,7 @@ async def test_emotion_disabled_returns_stub(mock_gemini):
 
 async def test_emotion_enabled_references_uploaded_file(mock_gemini):
     """with_emotions=True → emotion looks up the file by NAME (no re-upload)."""
-    from scribe.nodes.emotion import detect_emotions
+    from sibyl.nodes.emotion import detect_emotions
 
     # Pre-can the response so json.loads on its text succeeds
     mock_gemini.aio.models.generate_content.return_value = _fake_response(
@@ -127,7 +127,7 @@ async def test_emotion_enabled_references_uploaded_file(mock_gemini):
 
 async def test_emotion_enabled_without_file_name_skips(mock_gemini):
     """Defensive: with_emotions=True but no audio_file_name → skip cleanly."""
-    from scribe.nodes.emotion import detect_emotions
+    from sibyl.nodes.emotion import detect_emotions
 
     state = {
         "transcript": "...",
@@ -145,7 +145,7 @@ async def test_emotion_enabled_without_file_name_skips(mock_gemini):
 async def test_summarize_routes_through_khimaira_delegate():
     """summarize() should NOT call Gemini directly; it should route via
     khimaira's _delegate_impl with tier='auto'."""
-    from scribe.nodes import summarize as summarize_mod
+    from sibyl.nodes import summarize as summarize_mod
 
     mock_delegate = AsyncMock(return_value="_(via gemini/flash · 100→50 tokens · 0.5s · mode=auto)_\n\nMeeting was about deploys.")
     with patch.object(summarize_mod, "summarize") as _:
@@ -166,7 +166,7 @@ async def test_summarize_routes_through_khimaira_delegate():
 
 async def test_extract_routes_through_khimaira_delegate():
     """extract_actions() routes via khimaira delegate, parses JSON response."""
-    from scribe.nodes import extract as extract_mod
+    from sibyl.nodes import extract as extract_mod
 
     canned_json = (
         '_(via gemini/flash · 100→50 tokens · 0.5s · mode=auto)_\n\n'
@@ -185,7 +185,7 @@ async def test_extract_routes_through_khimaira_delegate():
 
 async def test_extract_handles_malformed_json():
     """If the delegate returns non-JSON, extract returns safe defaults."""
-    from scribe.nodes import extract as extract_mod
+    from sibyl.nodes import extract as extract_mod
 
     mock_delegate = AsyncMock(return_value="not-json-{")
     with patch("khimaira.server.mcp._delegate_impl", new=mock_delegate):
@@ -200,8 +200,8 @@ async def test_extract_handles_malformed_json():
 
 
 def test_scribe_mcp_exposes_six_tools():
-    """The scribe MCP server registers all six tools."""
-    from scribe.server import mcp as scribe_mcp
+    """The sibyl MCP server registers all six tools."""
+    from sibyl.server import mcp as scribe_mcp
 
     tools = scribe_mcp._tool_manager.list_tools()
     names = sorted(t.name for t in tools)
@@ -216,7 +216,7 @@ def test_scribe_mcp_exposes_six_tools():
 
 
 def test_scribe_tools_register_under_prefix():
-    """khimaira's register_sibling_tools surfaces scribe tools as scribe_*."""
+    """khimaira's register_sibling_tools surfaces sibyl tools as sibyl_*."""
     from mcp.server.fastmcp import FastMCP
 
     from khimaira.server.sibling_tools import register_sibling_tools
@@ -227,7 +227,7 @@ def test_scribe_tools_register_under_prefix():
     scribe_tools = sorted(t.name for t in tools if t.name.startswith("scribe_"))
     assert scribe_tools == [
         "scribe_list_active_recordings",
-        "scribe_process",
+        "sibyl_process",
         "scribe_record_start",
         "scribe_record_stop",
         "scribe_summarize",
@@ -241,7 +241,7 @@ def test_scribe_tools_register_under_prefix():
 def test_transcribe_prompt_no_hints_falls_back_to_self_introduction():
     """No known_speakers + no accent_hint → original self-introduction prompt
     (back-compat with existing callers)."""
-    from scribe.nodes.transcribe import _build_prompt
+    from sibyl.nodes.transcribe import _build_prompt
 
     prompt = _build_prompt(known_speakers=[], accent_hint="")
     assert "introduce themselves" in prompt
@@ -253,7 +253,7 @@ def test_transcribe_prompt_no_hints_falls_back_to_self_introduction():
 def test_transcribe_prompt_known_speakers_filters_background():
     """known_speakers populates the participant list AND adds the
     background-voice filter directive."""
-    from scribe.nodes.transcribe import _build_prompt
+    from sibyl.nodes.transcribe import _build_prompt
 
     prompt = _build_prompt(
         known_speakers=["Alice", "Bob", "Charlie"],
@@ -273,7 +273,7 @@ def test_transcribe_prompt_known_speakers_filters_background():
 def test_transcribe_prompt_example_uses_first_speaker_not_hardcoded():
     """The cueing-pattern example uses the FIRST speaker in the list,
     proving no hardcoded names leak in."""
-    from scribe.nodes.transcribe import _build_prompt
+    from sibyl.nodes.transcribe import _build_prompt
 
     prompt = _build_prompt(known_speakers=["Zeke", "Yara"], accent_hint="")
     # Cueing example built from the list (not hardcoded "Sai, go ahead"
@@ -287,7 +287,7 @@ def test_transcribe_prompt_example_uses_first_speaker_not_hardcoded():
 
 def test_transcribe_prompt_accent_hint_added():
     """accent_hint adds the acoustic-context section."""
-    from scribe.nodes.transcribe import _build_prompt
+    from sibyl.nodes.transcribe import _build_prompt
 
     prompt = _build_prompt(known_speakers=[], accent_hint="Indian English")
     assert "Acoustic context" in prompt
@@ -304,11 +304,11 @@ def test_record_start_persists_hints_in_active_recording(monkeypatch, tmp_path):
     fake_proc.pid = 12345
     fake_proc.poll = MagicMock(return_value=None)
     monkeypatch.setattr(
-        "scribe.recording_control.subprocess.Popen",
+        "sibyl.recording_control.subprocess.Popen",
         lambda *a, **kw: fake_proc,
     )
 
-    from scribe import recording_control
+    from sibyl import recording_control
 
     info = recording_control.start_recording(
         output_path=str(tmp_path / "test.wav"),
@@ -333,7 +333,7 @@ def test_record_start_persists_hints_in_active_recording(monkeypatch, tmp_path):
 def test_parse_speakers_handles_messy_input():
     """The MCP tool's comma-separated string parser tolerates spaces,
     newlines, trailing commas."""
-    from scribe.server.mcp import _parse_speakers
+    from sibyl.server.mcp import _parse_speakers
 
     assert _parse_speakers("") == []
     assert _parse_speakers("Alice") == ["Alice"]

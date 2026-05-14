@@ -1,5 +1,5 @@
 [project]
-name = "scribe"
+name = "sibyl"
 version = "0.2.0"
 description = "Meeting transcription + summarization via Gemini, routed through khimaira's pool router"
 readme = "README.md"
@@ -8,19 +8,19 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    # Gemini SDK — the only LLM provider scribe uses directly (audio
+    # Gemini SDK — the only LLM provider sibyl uses directly (audio
     # capability). Text-only post-processing nodes route through
     # khimaira's pool router and don't pin a provider.
     "google-genai>=1.70",
     "langgraph>=1.1.4",
-    # FastMCP — scribe exposes its tools as a FastMCP server; khimaira
+    # FastMCP — sibyl exposes its tools as a FastMCP server; khimaira
     # re-registers them under its own MCP via sibling-tools loader.
     "mcp>=1.0",
     # Audio capture deps — recorder.py / live.py
     "numpy>=2.4.4",
     "sounddevice>=0.5.5",
     "soundfile>=0.13.1",
-    # Workspace siblings — scribe routes text-only nodes through
+    # Workspace siblings — sibyl routes text-only nodes through
     # khimaira's dispatch + records usage to khimaira's tracker.
     "khimaira",
     "khimaira-types",

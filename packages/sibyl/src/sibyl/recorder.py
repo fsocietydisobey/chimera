@@ -18,7 +18,7 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
-from scribe.config import Config
+from sibyl.config import Config
 
 
 def _get_default_monitor() -> str | None:
