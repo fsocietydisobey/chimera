@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from khimaira.bootstrap import dump_profile_json, load_profile, ProfileError
+from khimaira.bootstrap import dump_profile_json, load_profile, persist_active_profile, ProfileError
 from khimaira.bootstrap.runner import (
     RunReport,
     check_bootstrap,
@@ -238,6 +238,17 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
     _print_header(args, "bootstrap")
     report = run_bootstrap(args.profile_obj, force=args.force)
     _print_report(report)
+
+    # Persist the active profile path so subsequent `khimaira sync`
+    # without --profile resolves the same profile (instead of falling
+    # back to the built-in default which silently misses sibling
+    # repos + dotfiles). See task #66 v1.1 issue #1.
+    if not report.had_failures and args.profile:
+        marker = persist_active_profile(args.profile)
+        if marker:
+            print(f"\n📌 active profile recorded at {marker}")
+            print("   subsequent `khimaira sync` will use it without --profile")
+
     return 1 if report.had_failures else 0
 
 
@@ -270,6 +281,14 @@ def _run_sync(args: argparse.Namespace) -> int:
         force=args.force,
         auto_restart_monitor=args.auto_restart,
     )
+
+    # Same persist behavior as bootstrap — running sync with an explicit
+    # --profile arg pins it for next time. Silent (no print) in --quiet
+    # mode; the persist itself is idempotent so the no-op case is fine.
+    if not report.had_failures and args.profile:
+        marker = persist_active_profile(args.profile)
+        if marker and not args.quiet:
+            print(f"\n📌 active profile recorded at {marker}")
 
     if not args.quiet:
         _print_report(report)

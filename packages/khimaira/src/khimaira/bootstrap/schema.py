@@ -276,6 +276,45 @@ def load_profile(source: str | None = None) -> tuple[Profile, str]:
     return _load_default(), "built-in default (khimaira-only)"
 
 
+def persist_active_profile(source: str) -> str | None:
+    """Symlink the explicit profile to `~/.config/khimaira/profile.yaml`.
+
+    Called after a successful `khimaira bootstrap` / `khimaira sync`
+    with an explicit `--profile <path>` so subsequent invocations
+    without `--profile` find the same profile via load_profile's
+    step-3 lookup (the XDG path). Solves the "bare `khimaira sync`
+    silently uses built-in default profile" footgun.
+
+    Behavior:
+      - http(s) URL source → returns None (can't symlink a URL).
+        Caller should set KHIMAIRA_PROFILE env or pass --profile
+        explicitly on follow-up invocations.
+      - Existing regular file at the XDG path → returns None
+        (don't clobber a hand-edited profile.yaml).
+      - Existing symlink at the XDG path → updated to point at
+        the new source.
+      - Missing XDG path → symlink created.
+
+    Returns the XDG marker path on success, None on skip.
+    """
+    if source.startswith(("http://", "https://")):
+        return None
+    target = Path(os.path.expanduser(source)).resolve()
+    if not target.is_file():
+        return None
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    marker = Path(xdg) / "khimaira" / "profile.yaml"
+    # Don't overwrite a hand-written regular file. Only update if the
+    # marker is missing or already a symlink (our own prior write).
+    if marker.exists() and not marker.is_symlink():
+        return None
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    if marker.is_symlink():
+        marker.unlink()
+    marker.symlink_to(target)
+    return str(marker)
+
+
 def _load_explicit(source: str) -> Profile:
     """Path OR http(s) URL → Profile. Errors with a clear message on
     either source type's failure mode."""

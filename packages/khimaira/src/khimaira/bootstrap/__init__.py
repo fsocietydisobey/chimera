@@ -30,6 +30,7 @@ from khimaira.bootstrap.schema import (
     SymlinkEntry,
     dump_profile_json,
     load_profile,
+    persist_active_profile,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "SymlinkEntry",
     "dump_profile_json",
     "load_profile",
+    "persist_active_profile",
 ]

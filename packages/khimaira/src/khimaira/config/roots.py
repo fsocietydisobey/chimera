@@ -54,7 +54,15 @@ def _load_roots(
         if resolved in seen:
             return
         if not Path(resolved).is_dir():
-            log.warning("roots: skipping %s — not a directory", path_str)
+            # Demoted from WARNING to DEBUG (2026-05-14): "skip missing
+            # optional root" is expected behavior. A user's roots.yaml
+            # may legitimately list paths that exist only on some
+            # machines (e.g. `~/work/jeevy_portal` on the work laptop
+            # but not the personal desktop). Logging at WARNING leaked
+            # noise through `khimaira sync --quiet` (intended to be
+            # silent on no-op runs); DEBUG keeps the info for anyone
+            # who explicitly raises log level to debug a roots issue.
+            log.debug("roots: skipping %s — not a directory", path_str)
             return
         seen.add(resolved)
         out.append(resolved)
