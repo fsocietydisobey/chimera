@@ -12,9 +12,11 @@
 
 name: fsocietydisobey
 description: |
-  Joseph's portable agent setup. Clones dotfiles + sibling MCP server
-  repos under ~/dev/, symlinks Claude rules/commands, registers all
-  five khimaira-ecosystem MCP servers + Linear, installs the supervisor.
+  Joseph's portable agent setup. Clones dotfiles, symlinks Claude
+  rules/commands/agents, registers khimaira's unified MCP server
+  (which now exposes seance/specter/scarlet tools under the same
+  connection — see NORTH_STAR Phase 0), plus the Linear MCP for
+  task surfacing. Installs the supervisor.
 
 dotfiles:
   repo: git@github.com:fsocietydisobey/dotfiles.git
@@ -34,15 +36,12 @@ repos:
     # plain `uv sync` only installs the root project's deps, which drops
     # member-package entry-point scripts (notably `.venv/bin/khimaira`).
     install: uv sync --all-packages
-  - name: seance
-    url: git@github.com:fsocietydisobey/seance.git
-    install: uv sync
-  - name: specter
-    url: git@github.com:fsocietydisobey/specter.git
-    install: uv sync
-  - name: scarlet
-    url: git@github.com:fsocietydisobey/scarlet.git
-    install: uv sync
+  # Phase 0 consolidation: seance/specter/scarlet source now lives at
+  # packages/{seance,specter,scarlet}/ inside khimaira. The legacy
+  # standalone repos at fsocietydisobey/{seance,specter,scarlet} are
+  # archived; their tools are exposed through khimaira's MCP under the
+  # source-prefixed names (mcp__khimaira__seance_*, specter_*, scarlet_*).
+  # No separate clone or `*_serve` MCP registration needed.
   - name: ai-orchestrator
     url: git@github.com:fsocietydisobey/ai-orchestrator.git
     install: uv sync
@@ -50,14 +49,10 @@ repos:
 mcp_servers:
   - name: khimaira
     # `python -m khimaira.cli mcp` (not bare `khimaira mcp`) survives the
-    # workspace-sync churn that can drop .venv/bin/khimaira.
+    # workspace-sync churn that can drop .venv/bin/khimaira. This single
+    # MCP entry surfaces khimaira native tools AND the seance/specter/
+    # scarlet tools (re-registered under prefixed names at boot).
     command: uv --directory ~/dev/khimaira run python -m khimaira.cli mcp 2>>/tmp/khimaira.log
-  - name: seance
-    command: uv --directory ~/dev/seance run seance serve
-  - name: specter
-    command: uv --directory ~/dev/specter run specter serve
-  - name: scarlet
-    command: uv --directory ~/dev/scarlet run scarlet serve
   - name: ai-orchestrator
     command: uv --directory ~/dev/ai-orchestrator run ai-orchestrator 2>>/tmp/orchestrator.log
   - name: linear

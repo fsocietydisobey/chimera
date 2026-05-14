@@ -284,8 +284,10 @@ see in their host's tool listing.
 
 ### Tool categories
 
-~61 tools, grouped by intent. Counts in this table are approximate;
-the live install is authoritative — `khimaira tools --category mcp`.
+~113 tools total after the NORTH_STAR Phase 0 unification (65 khimaira
+native + 48 re-registered from sibling packages). Counts in this
+table are approximate; the live install is authoritative —
+`khimaira tools --category mcp`.
 
 | Category | Tools | Purpose | Tier |
 |---|---|---|---|
@@ -295,6 +297,27 @@ the live install is authoritative — `khimaira tools --category mcp`.
 | **Process supervision** | `spawn_process`, `wait_for_process`, `kill_process`, `list_processes`, `follow_process` | Track long-running subprocesses (test runners, dev servers, builds) | **beta** |
 | **LangGraph observability** | `monitor_*`, `wait_for_run` | Inspect attached LangGraph projects (topology, runs, anomalies, schema drift) | **beta** |
 | **Health + introspection** | `health`, `list_mcp_calls`, `usage_report` | Daemon liveness, recent invocation history, aggregate usage | **stable** |
+| **Semantic code search** | `seance_*` (5) | Re-registered from `seance` — natural-language search over indexed codebases (`semantic_search`, `index_project`, `reindex_changed`, `find_similar`, `list_projects`) | **beta** |
+| **Browser debugging** | `specter_*` (34) | Re-registered from `specter` — CDP-based console/network/screenshot/interaction tools for any Chromium tab on `:9222` | **beta** |
+| **Codebase cartography** | `scarlet_*` (9) | Re-registered from `scarlet` — tree-sitter-driven feature scanning, CLAUDE.md generation, dep graphs, barrels | **beta** |
+
+#### Sibling tool naming
+
+Sibling packages keep their own FastMCP instances (so the legacy
+standalone `seance serve` / `specter serve` / `scarlet serve` paths
+continue to work for backward compatibility), but khimaira's MCP
+re-registers each tool at boot under a **source-prefixed** name:
+
+```
+seance.semantic_search       → mcp__khimaira__seance_semantic_search
+specter.take_screenshot      → mcp__khimaira__specter_take_screenshot
+scarlet.analyze_project      → mcp__khimaira__scarlet_analyze_project
+```
+
+The prefix is `<source>_<tool_name>`. Adapter authors targeting the
+unified server should expect every sibling tool to carry this prefix
+— there is no collision with khimaira's native tools because
+khimaira tools have no `seance_`, `specter_`, or `scarlet_` prefix.
 
 Per-tool signatures and docstrings are the source of truth. Get the
 full list:

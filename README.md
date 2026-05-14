@@ -93,9 +93,9 @@ flowchart LR
     Khimaira -->|subprocess| Gemini["gemini"]
     Khimaira -->|subprocess| Ollama["ollama (local — $0)"]
     Khimaira -->|subprocess| LLM["llm + OpenRouter"]
-    Khimaira -.->|in-process| Scarlet["Scarlet<br/>cartography"]
-    Khimaira -.->|in-process| Seance["Séance<br/>semantic search"]
-    Khimaira -.->|MCP| Specter["Specter<br/>browser debug"]
+    Khimaira -.->|unified MCP| Scarlet["Scarlet<br/>cartography"]
+    Khimaira -.->|unified MCP| Seance["Séance<br/>semantic search"]
+    Khimaira -.->|unified MCP| Specter["Specter<br/>browser debug"]
 
     style Khimaira fill:#1f6feb,stroke:#0d419d,color:#fff
     style Ollama fill:#2da44e,stroke:#1a7f37,color:#fff
@@ -152,7 +152,7 @@ cost is dwarfed by the savings from routing trivial tasks down-tier.
 | **LangGraph observer** | `khimaira attach <app>` injects a zero-touch observer into any Python project's venv. Cost, slow calls, trace waterfalls in a local dashboard. |
 | **Multi-session coordination** | Sessions, inboxes, handoffs, decisions, transcripts. Parallel Claude/Cursor/Cline windows can ask each other questions, leave directives, see what stopped sessions said. |
 | **Process observability** | `wait_for_process(label, completion_signal=regex)` replaces 30 polling calls with one blocking MCP call. |
-| **Codebase cartography** | Séance (semantic vector search), Scarlet (CLAUDE.md + dep graphs), Specter (browser debug via CDP) — all under one MCP roof. |
+| **Codebase cartography + browser debug** | Séance (semantic search via `seance_*`), Scarlet (CLAUDE.md + dep graphs via `scarlet_*`), Specter (browser debug via CDP, `specter_*`) — all re-registered under khimaira's MCP at boot. One connection, 113 tools. |
 | **Task sources** | SessionStart hook surfaces what's on your plate from any configured task source (JSONL, GitHub Issues, plug in your own via Protocol). |
 
 Full surface map: `khimaira tools`.
