@@ -36,27 +36,77 @@ from scribe.nodes.transcribe import transcribe as transcribe_node
 mcp = FastMCP("scribe")
 
 
+def _parse_speakers(raw: str) -> list[str]:
+    """Parse a comma- or newline-separated speaker list. MCP tools take
+    string args (no native list type), so the caller passes
+    'Alice, Bob, Charlie' and we split into ['Alice', 'Bob', 'Charlie'].
+    Empty input → empty list."""
+    if not raw or not raw.strip():
+        return []
+    parts = [p.strip() for p in raw.replace("\n", ",").split(",")]
+    return [p for p in parts if p]
+
+
 @mcp.tool()
-async def record_start(output_path: str = "") -> str:
+async def record_start(
+    output_path: str = "",
+    known_speakers: str = "",
+    accent_hint: str = "",
+    task_id: str = "",
+) -> str:
     """Start recording a meeting in the background.
 
     Captures system audio + microphone, mixed to a single WAV file.
-    Returns a JSON blob with `recording_id`, `output_path`, and `pid`.
-    Pass the `recording_id` to `record_stop` when the meeting ends.
+    Returns a JSON-shaped status block with `recording_id`, `output_path`,
+    and the transcription hints you declared. Pass the `recording_id` to
+    `record_stop` when the meeting ends — `record_stop` echoes your hints
+    back so the agent can pipe them into `scribe_process` automatically.
+
+    The participant names you supply are NEVER persisted by khimaira —
+    they live only in-memory for the duration of the recording, get
+    returned at stop time, and that's it. khimaira stays generic.
 
     Args:
         output_path: Optional WAV destination. Default:
             ~/.local/share/meeting-scribe/meeting_<timestamp>.wav.
+        known_speakers: Comma-separated participant names — e.g.
+            "Alice, Bob, Charlie". When provided, transcribe filters
+            voices that aren't on the list (background office workers,
+            hallway chatter) and uses these names for labeling rather
+            than generic "Speaker 1"/"Unknown Speaker". Empty = use
+            today's "label by self-introduction" fallback.
+        accent_hint: Optional acoustic context to prime Gemini's audio
+            understanding (e.g. "Indian English", "British + American",
+            "speakers may code-switch to Hindi"). Empty = no hint.
+        task_id: Optional project label for khimaira usage attribution.
+            Stored on the recording; flows through to per-node usage
+            records when process runs.
     """
-    info = recording_control.start_recording(output_path or None)
+    speakers = _parse_speakers(known_speakers)
+    info = recording_control.start_recording(
+        output_path or None,
+        known_speakers=speakers,
+        accent_hint=accent_hint or "",
+        task_id=task_id or "",
+    )
+    hints_block = ""
+    if speakers:
+        hints_block += f"  participants: {', '.join(speakers)}\n"
+    if accent_hint:
+        hints_block += f"  accent:       {accent_hint}\n"
+    if task_id:
+        hints_block += f"  task_id:      {task_id}\n"
     return (
         f"🎙️  Recording started.\n"
         f"  recording_id: {info['recording_id']}\n"
         f"  output_path:  {info['output_path']}\n"
         f"  pid:          {info['pid']}\n"
-        f"  started_at:   {info['started_at']}\n\n"
-        f"Call `scribe_record_stop(recording_id={info['recording_id']!r})` "
-        f"when the meeting ends to save and finalize the WAV file."
+        f"  started_at:   {info['started_at']}\n"
+        f"{hints_block}"
+        f"\nCall `scribe_record_stop(recording_id={info['recording_id']!r})` "
+        f"when the meeting ends. Stop will echo your participant list + "
+        f"accent so you can pipe them into `scribe_process` without "
+        f"retyping."
     )
 
 
@@ -65,7 +115,9 @@ async def record_stop(recording_id: str) -> str:
     """Stop an in-flight recording and return the saved file path.
 
     SIGINTs the recorder subprocess (clean stop + save), waits up to
-    10s for the WAV file to finalize.
+    10s for the WAV file to finalize. Echoes back the transcription
+    hints (participant list, accent, task_id) the caller declared at
+    start time so the agent can pipe them straight into `scribe_process`.
 
     Args:
         recording_id: ID returned by `record_start`.
@@ -77,18 +129,44 @@ async def record_stop(recording_id: str) -> str:
     out = info["output_path"]
     size_mb = info.get("size_bytes", 0) / 1_000_000.0
     clean = "✅" if info.get("stopped_cleanly") else "⚠️"
+    speakers = info.get("known_speakers") or []
+    accent = info.get("accent_hint") or ""
+    task = info.get("task_id") or ""
+
+    # Build the recommended next-step process call with hints pre-filled
+    # so the agent can paste it back without retyping anything.
+    process_args = [f"audio_path={out!r}"]
+    if speakers:
+        process_args.append(f"known_speakers={', '.join(speakers)!r}")
+    if accent:
+        process_args.append(f"accent_hint={accent!r}")
+    if task:
+        process_args.append(f"task_id={task!r}")
+    process_call = "scribe_process(" + ", ".join(process_args) + ")"
+
+    echoed = ""
+    if speakers:
+        echoed += f"  participants: {', '.join(speakers)}\n"
+    if accent:
+        echoed += f"  accent:       {accent}\n"
+
     return (
         f"{clean} Recording stopped.\n"
         f"  output_path:  {out}\n"
         f"  size:         {size_mb:.2f} MB\n"
         f"  started_at:   {info.get('started_at', '?')}\n"
-        f"  stopped_at:   {info.get('stopped_at', '?')}\n\n"
-        f"Run `scribe_process(audio_path={out!r})` to transcribe + summarize."
+        f"  stopped_at:   {info.get('stopped_at', '?')}\n"
+        f"{echoed}"
+        f"\nNext: `{process_call}` to transcribe + summarize."
     )
 
 
 @mcp.tool()
-async def transcribe(audio_path: str) -> str:
+async def transcribe(
+    audio_path: str,
+    known_speakers: str = "",
+    accent_hint: str = "",
+) -> str:
     """Transcribe an audio file (no summarize / extract).
 
     Uses Gemini's audio-capable model via the Files API. Returns the
@@ -96,11 +174,21 @@ async def transcribe(audio_path: str) -> str:
 
     Args:
         audio_path: Path to a WAV / audio file.
+        known_speakers: Comma-separated participant names. When set,
+            transcribe filters background voices and labels with these
+            names. See `scribe_record_start` for the full semantics.
+        accent_hint: Acoustic context (e.g. "Indian English").
     """
     path = Path(audio_path).expanduser().resolve()
     if not path.is_file():
         return f"❌ no audio file at {path}"
-    state = {"audio_path": str(path), "with_emotions": False, "task_id": None}
+    state = {
+        "audio_path": str(path),
+        "with_emotions": False,
+        "task_id": None,
+        "known_speakers": _parse_speakers(known_speakers),
+        "accent_hint": accent_hint or "",
+    }
     result = await transcribe_node(state)
     return result.get("transcript", "(empty transcript)")
 
@@ -110,6 +198,8 @@ async def process(
     audio_path: str,
     with_emotions: bool = False,
     task_id: str = "",
+    known_speakers: str = "",
+    accent_hint: str = "",
 ) -> str:
     """Run the full meeting pipeline on an audio file.
 
@@ -120,8 +210,9 @@ async def process(
 
     Token-cost notes:
     - Audio is uploaded once via Files API (not duplicated per node).
-    - Summarize + extract route through khimaira's auto pool router
-      (cheapest text model), recording mode="auto" in usage.jsonl.
+    - Summarize + extract route through khimaira's pool router (text-only,
+      cheapest competent model). Pinned to claude-haiku until the
+      gemini-runner-bug fix lands.
     - Emotion is OPT-IN — leaving with_emotions=False keeps the second
       audio submission off entirely. Default is False; suitable for
       standups, retros, demos. Enable for performance reviews etc.
@@ -130,12 +221,22 @@ async def process(
         audio_path: Path to a WAV / audio file.
         with_emotions: Run emotion-detection pass (extra audio cost).
         task_id: Optional project label for khimaira usage attribution.
+        known_speakers: Comma-separated participant names. When set,
+            transcribe filters non-participant voices and uses these
+            names for labeling rather than generic "Speaker N". khimaira
+            never persists the list — it's caller-provided per call.
+        accent_hint: Acoustic context (e.g. "Indian English") to prime
+            Gemini's audio understanding.
     """
     path = Path(audio_path).expanduser().resolve()
     if not path.is_file():
         return f"❌ no audio file at {path}"
     final = await process_meeting(
-        path, with_emotions=with_emotions, task_id=task_id or None
+        path,
+        with_emotions=with_emotions,
+        task_id=task_id or None,
+        known_speakers=_parse_speakers(known_speakers),
+        accent_hint=accent_hint or "",
     )
     # Trim transcript to a head/tail snippet for the MCP return; full
     # transcript is in the state dict but ~10-50KB is unwieldy inline.

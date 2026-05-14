@@ -233,3 +233,112 @@ def test_scribe_tools_register_under_prefix():
         "scribe_summarize",
         "scribe_transcribe",
     ]
+
+
+# -------------------- known_speakers + accent_hint -------------------- #
+
+
+def test_transcribe_prompt_no_hints_falls_back_to_self_introduction():
+    """No known_speakers + no accent_hint → original self-introduction prompt
+    (back-compat with existing callers)."""
+    from scribe.nodes.transcribe import _build_prompt
+
+    prompt = _build_prompt(known_speakers=[], accent_hint="")
+    assert "introduce themselves" in prompt
+    assert "Joseph" in prompt or "Mark" in prompt  # back-compat example
+    assert "Known participants" not in prompt
+    assert "Acoustic context" not in prompt
+
+
+def test_transcribe_prompt_known_speakers_filters_background():
+    """known_speakers populates the participant list AND adds the
+    background-voice filter directive."""
+    from scribe.nodes.transcribe import _build_prompt
+
+    prompt = _build_prompt(
+        known_speakers=["Alice", "Bob", "Charlie"],
+        accent_hint="",
+    )
+    assert "Alice, Bob, Charlie" in prompt
+    # The 3-participant count + filter instructions are both present
+    assert "exactly 3 of them" in prompt
+    assert "background office workers" in prompt
+    assert "NOT participants" in prompt
+    # Labeling examples are built from the actual speaker list — no
+    # hardcoded "Sai" / "Joseph" / etc. leaking into the prompt
+    assert "'Alice:'" in prompt or "Alice:" in prompt
+    assert "'Bob:'" in prompt or "Bob:" in prompt
+
+
+def test_transcribe_prompt_example_uses_first_speaker_not_hardcoded():
+    """The cueing-pattern example uses the FIRST speaker in the list,
+    proving no hardcoded names leak in."""
+    from scribe.nodes.transcribe import _build_prompt
+
+    prompt = _build_prompt(known_speakers=["Zeke", "Yara"], accent_hint="")
+    # Cueing example built from the list (not hardcoded "Sai, go ahead"
+    # like an earlier draft had)
+    assert "Zeke, go ahead" in prompt
+    # No leaked names from the user's actual team
+    assert "Sai" not in prompt
+    assert "Rajat" not in prompt
+    assert "Pranav" not in prompt
+
+
+def test_transcribe_prompt_accent_hint_added():
+    """accent_hint adds the acoustic-context section."""
+    from scribe.nodes.transcribe import _build_prompt
+
+    prompt = _build_prompt(known_speakers=[], accent_hint="Indian English")
+    assert "Acoustic context" in prompt
+    assert "Indian English" in prompt
+    assert "code-switch" in prompt  # the code-switching guidance
+
+
+def test_record_start_persists_hints_in_active_recording(monkeypatch, tmp_path):
+    """recording_control.start_recording stores known_speakers + accent
+    on the _ActiveRecording so stop can echo them back."""
+    from unittest.mock import MagicMock
+
+    fake_proc = MagicMock()
+    fake_proc.pid = 12345
+    fake_proc.poll = MagicMock(return_value=None)
+    monkeypatch.setattr(
+        "scribe.recording_control.subprocess.Popen",
+        lambda *a, **kw: fake_proc,
+    )
+
+    from scribe import recording_control
+
+    info = recording_control.start_recording(
+        output_path=str(tmp_path / "test.wav"),
+        known_speakers=["Alice", "Bob"],
+        accent_hint="British",
+        task_id="standup",
+    )
+    assert info["known_speakers"] == ["Alice", "Bob"]
+    assert info["accent_hint"] == "British"
+    assert info["task_id"] == "standup"
+
+    # The _ActiveRecording carries them
+    rec = recording_control._active[info["recording_id"]]
+    assert rec.known_speakers == ["Alice", "Bob"]
+    assert rec.accent_hint == "British"
+    assert rec.task_id == "standup"
+
+    # Cleanup
+    del recording_control._active[info["recording_id"]]
+
+
+def test_parse_speakers_handles_messy_input():
+    """The MCP tool's comma-separated string parser tolerates spaces,
+    newlines, trailing commas."""
+    from scribe.server.mcp import _parse_speakers
+
+    assert _parse_speakers("") == []
+    assert _parse_speakers("Alice") == ["Alice"]
+    assert _parse_speakers("Alice, Bob, Charlie") == ["Alice", "Bob", "Charlie"]
+    assert _parse_speakers("Alice,Bob,Charlie") == ["Alice", "Bob", "Charlie"]
+    assert _parse_speakers("Alice\nBob\nCharlie") == ["Alice", "Bob", "Charlie"]
+    assert _parse_speakers("Alice, , Bob") == ["Alice", "Bob"]
+    assert _parse_speakers("  Alice  ,  Bob  ") == ["Alice", "Bob"]

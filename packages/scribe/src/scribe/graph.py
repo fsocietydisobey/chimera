@@ -78,6 +78,8 @@ async def process_meeting(
     *,
     with_emotions: bool = False,
     task_id: str | None = None,
+    known_speakers: list[str] | None = None,
+    accent_hint: str = "",
 ) -> MeetingState:
     """Run the full pipeline on an audio file. Returns final state.
 
@@ -90,12 +92,20 @@ async def process_meeting(
         task_id: Optional project label for khimaira usage attribution. All
             node-level usage records land in this bucket — so
             `khimaira usage savings --by task_id` shows per-meeting spend.
+        known_speakers: Optional list of meeting participant names. When
+            set, transcribe filters non-participant voices and uses the
+            list for labeling. khimaira passes names through verbatim
+            from the caller — never stored as defaults.
+        accent_hint: Optional acoustic context to help Gemini's audio
+            understanding (e.g. "Indian English", "British + American").
     """
     app = compile_graph()
     initial: MeetingState = {
         "audio_path": str(audio_path),
         "with_emotions": with_emotions,
         "task_id": task_id,
+        "known_speakers": list(known_speakers or []),
+        "accent_hint": accent_hint or "",
     }
     result = await app.ainvoke(
         initial, config={"callbacks": [get_tracer()]}
@@ -108,8 +118,16 @@ def process_meeting_sync(
     *,
     with_emotions: bool = False,
     task_id: str | None = None,
+    known_speakers: list[str] | None = None,
+    accent_hint: str = "",
 ) -> MeetingState:
     """Synchronous wrapper for process_meeting."""
     return asyncio.run(
-        process_meeting(audio_path, with_emotions=with_emotions, task_id=task_id)
+        process_meeting(
+            audio_path,
+            with_emotions=with_emotions,
+            task_id=task_id,
+            known_speakers=known_speakers,
+            accent_hint=accent_hint,
+        )
     )

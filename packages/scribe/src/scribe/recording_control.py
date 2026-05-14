@@ -34,12 +34,22 @@ from pathlib import Path
 
 @dataclass
 class _ActiveRecording:
-    """In-memory record of one in-flight recording subprocess."""
+    """In-memory record of one in-flight recording subprocess.
+
+    Carries transcription hints (known_speakers, accent_hint) the caller
+    declared at record_start time. They flow back out via record_stop's
+    return dict so the agent can pass them straight to scribe_process —
+    no re-typing the participant list after the meeting, and no need to
+    persist names anywhere in khimaira itself.
+    """
 
     recording_id: str
     pid: int
     output_path: Path
     started_at: str
+    known_speakers: list[str] = field(default_factory=list)
+    accent_hint: str = ""
+    task_id: str = ""
     proc: subprocess.Popen | None = field(default=None, repr=False)
 
 
@@ -52,12 +62,30 @@ def _default_output_dir() -> Path:
     return Path.home() / ".local" / "share" / "meeting-scribe"
 
 
-def start_recording(output_path: str | None = None) -> dict:
+def start_recording(
+    output_path: str | None = None,
+    *,
+    known_speakers: list[str] | None = None,
+    accent_hint: str = "",
+    task_id: str = "",
+) -> dict:
     """Spawn the recorder as a background subprocess.
 
-    Returns a dict with `recording_id`, `output_path`, `pid`, `started_at`.
-    The caller (typically an MCP tool wrapper) passes the recording_id
-    back to `stop_recording` when ready to finish.
+    Args:
+        output_path: WAV destination; defaults to a timestamped path
+            in ~/.local/share/meeting-scribe/.
+        known_speakers: List of expected participant names. Stored on
+            the recording so `record_stop` can return them and the
+            caller can pass them straight to `process` for accurate
+            speaker labeling. khimaira never persists this list.
+        accent_hint: Free-form acoustic context ("Indian English",
+            "British", "speakers may code-switch to Hindi"). Same
+            pass-through semantics.
+        task_id: Optional project label for usage attribution.
+
+    Returns a dict with `recording_id`, `output_path`, `pid`,
+    `started_at`, and the echoed transcription hints. Pass the
+    `recording_id` back to `stop_recording` when ready to finish.
     """
     if output_path:
         out = Path(output_path).expanduser().resolve()
@@ -86,6 +114,9 @@ def start_recording(output_path: str | None = None) -> dict:
         pid=proc.pid,
         output_path=out,
         started_at=started_at,
+        known_speakers=list(known_speakers or []),
+        accent_hint=accent_hint or "",
+        task_id=task_id or "",
         proc=proc,
     )
 
@@ -94,6 +125,9 @@ def start_recording(output_path: str | None = None) -> dict:
         "output_path": str(out),
         "pid": proc.pid,
         "started_at": started_at,
+        "known_speakers": list(known_speakers or []),
+        "accent_hint": accent_hint or "",
+        "task_id": task_id or "",
     }
 
 
@@ -125,6 +159,9 @@ def stop_recording(recording_id: str, *, wait_s: float = 10.0) -> dict:
             "output_path": str(rec.output_path),
             "stopped_cleanly": False,
             "warning": f"process not found at SIGINT time: {exc}",
+            "known_speakers": list(rec.known_speakers),
+            "accent_hint": rec.accent_hint,
+            "task_id": rec.task_id,
         }
 
     # Wait for the subprocess to exit + the file to materialize.
@@ -138,6 +175,9 @@ def stop_recording(recording_id: str, *, wait_s: float = 10.0) -> dict:
 
     _active.pop(recording_id, None)
 
+    # Echo back the transcription hints the caller declared at start time
+    # so the agent can pipe them straight into scribe_process — no need
+    # for the user to retype the participant list.
     return {
         "recording_id": recording_id,
         "output_path": str(rec.output_path),
@@ -145,6 +185,9 @@ def stop_recording(recording_id: str, *, wait_s: float = 10.0) -> dict:
         "size_bytes": rec.output_path.stat().st_size if rec.output_path.is_file() else 0,
         "started_at": rec.started_at,
         "stopped_at": datetime.now(timezone.utc).isoformat(),
+        "known_speakers": list(rec.known_speakers),
+        "accent_hint": rec.accent_hint,
+        "task_id": rec.task_id,
     }
 
 
