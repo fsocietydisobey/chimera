@@ -27,7 +27,7 @@ import logging
 
 log = logging.getLogger(__name__)
 
-SIBLING_PACKAGES: tuple[str, ...] = ("seance", "specter", "scarlet")
+SIBLING_PACKAGES: tuple[str, ...] = ("seance", "specter", "scarlet", "scribe")
 
 
 def register_sibling_tools(khimaira_mcp) -> int:

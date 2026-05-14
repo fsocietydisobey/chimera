@@ -33,15 +33,16 @@ def test_register_sibling_tools_attaches_all_three_packages():
 
 def test_register_sibling_tools_uses_source_prefix():
     """Every re-registered tool has a `<source>_` prefix."""
-    from khimaira.server.sibling_tools import register_sibling_tools
+    from khimaira.server.sibling_tools import SIBLING_PACKAGES, register_sibling_tools
 
     fresh_mcp = FastMCP("test-khimaira")
     register_sibling_tools(fresh_mcp)
 
+    expected_prefixes = tuple(f"{name}_" for name in SIBLING_PACKAGES)
     names = [t.name for t in fresh_mcp._tool_manager.list_tools()]
     for name in names:
-        assert name.startswith(("seance_", "specter_", "scarlet_")), (
-            f"tool {name!r} lacks a source prefix"
+        assert name.startswith(expected_prefixes), (
+            f"tool {name!r} lacks a source prefix in {expected_prefixes}"
         )
 
 

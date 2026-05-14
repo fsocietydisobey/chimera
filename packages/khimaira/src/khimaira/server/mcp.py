@@ -2764,19 +2764,27 @@ def main():
 
     from khimaira.dispatch.runners import kill_all_subprocesses
     from khimaira.pidlock import acquire_lock
-    from khimaira.server.sibling_tools import register_sibling_tools
 
     setup_logging()
     acquire_lock("graph")
     log.info("khimaira starting starting")
-    # NORTH_STAR Phase 0: surface seance/specter/scarlet tools under khimaira's
-    # MCP so one connection exposes the whole capability suite. Re-registration
-    # happens at server boot (not module import) so failures here can't
-    # break test collection that imports khimaira.server.mcp.
-    registered = register_sibling_tools(mcp)
-    log.info("khimaira mcp: re-registered %d sibling tools", registered)
     atexit.register(kill_all_subprocesses)
     mcp.run()
+
+
+# NORTH_STAR Phase 0: surface seance/specter/scarlet tools under khimaira's
+# MCP so one connection exposes the whole capability suite. Runs at module
+# import time — not inside main() — because the production entry point
+# `khimaira mcp` (via khimaira.cli.mcp_serve.run) imports `mcp` and calls
+# `mcp.run()` directly without invoking main(). Module-load registration
+# means the wiring is in place no matter how the server is launched.
+# Safe at import time: register_sibling_tools wraps each sibling import
+# in try/except, so a broken sibling logs + skips without breaking
+# khimaira.server.mcp itself.
+from khimaira.server.sibling_tools import register_sibling_tools  # noqa: E402
+
+_sibling_tool_count = register_sibling_tools(mcp)
+log.info("khimaira mcp: re-registered %d sibling tools at module load", _sibling_tool_count)
 
 
 if __name__ == "__main__":
