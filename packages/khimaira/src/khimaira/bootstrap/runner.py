@@ -137,45 +137,77 @@ def run_bootstrap(profile: Profile, *, force: bool = False) -> RunReport:
 
 
 def run_sync(profile: Profile, *, force: bool = False) -> RunReport:
-    """Ongoing sync. Pulls dotfiles + re-applies the manifest.
+    """Ongoing sync — pulls every declared repo + re-applies the manifest.
 
-    Differs from bootstrap in two ways:
-      - dotfiles: `git pull` (not clone)
-      - repos: `git pull` each before re-running install (TODO when needed)
+    Order (task #66):
+      1. dotfiles git pull
+      2. sibling repos git fetch + ff-only merge
+      3. uv sync --all-packages (only if any pulled repo touched
+         pyproject.toml or uv.lock)
+      4. apply symlinks (idempotent — picks up new entries added since
+         last bootstrap)
+      5. re-register MCP servers (idempotent at this layer)
+      6. re-apply Claude Code hooks (necessary on sync because a
+         khimaira pull may have shipped new hook modules)
+      7. report unpushed-commits for every synced repo (report-only;
+         sync never auto-pushes)
 
-    For now, sync reuses bootstrap's operations after the dotfiles
-    pull — they're already idempotent. Repo pulls land in a follow-up
-    when the maintainer surfaces a use case for "update siblings on
-    every sync" (default: explicit, via `cd ~/dev/<repo> && git pull`).
+    All operations are idempotent — re-running on a no-change machine
+    produces all-`unchanged` results.
     """
     report = RunReport()
 
-    # --- dotfiles pull ---
+    # --- 1. dotfiles pull ---
     if profile.dotfiles:
         r = ops.sync_dotfiles(profile.dotfiles)
         report.results.append(r)
         if r.status == "failed":
-            # Don't try to apply symlinks against a possibly-stale
-            # dotfiles tree if the pull itself errored. Surface that
-            # one failure and stop — user fixes git state, re-runs.
+            # Don't apply symlinks against a possibly-stale dotfiles
+            # tree if the pull itself errored. Surface the one failure
+            # and bail — user fixes git state, re-runs.
             return report
 
-    # Re-apply symlinks (picks up any new entries added since last bootstrap).
+    # --- 2. sibling repo pulls ---
+    # Track any-deps-changed across the whole fan-out so we know
+    # whether to fire `uv sync` once at the end (cheaper than per-repo).
+    any_deps_changed = False
+    for repo_spec in profile.repos:
+        r = ops.git_pull_repo(repo_spec)
+        report.results.append(r)
+        if r.meta.get("deps_changed"):
+            any_deps_changed = True
+
+    # --- 3. uv sync (workspace-level, single shot) ---
+    # Only meaningful when running from a checkout (workspace mode).
+    # Installed-wheel runs skip — there's no workspace to re-sync.
+    workspace_root = _khimaira_repo_root()
+    if workspace_root is not None:
+        report.results.append(
+            ops.maybe_run_uv_sync(workspace_root, any_deps_changed)
+        )
+
+    # --- 4. apply symlinks (idempotent — picks up new entries) ---
     if profile.dotfiles:
         dotfiles_root = Path(os.path.expanduser(profile.dotfiles.path)).resolve()
         if dotfiles_root.is_dir():
             for entry in profile.dotfiles.symlinks:
                 report.results.append(ops.apply_symlink(entry, dotfiles_root))
 
-    # Re-register MCP servers (idempotent — skips already-registered).
+    # --- 5. re-register MCP servers (idempotent — skips already-registered) ---
     for mcp in profile.mcp_servers:
         report.results.append(ops.register_mcp(mcp, force=force))
 
-    # Re-apply Claude Code hooks. Idempotent at the install-hooks layer
-    # — and necessary on sync because a khimaira pull may have shipped
-    # new hook modules.
+    # --- 6. re-apply Claude Code hooks ---
+    # Idempotent at the install-hooks layer — and necessary on sync
+    # because a khimaira pull may have shipped new hook modules.
     if profile.install_claude_hooks:
         report.results.append(ops.install_claude_hooks())
+
+    # --- 7. unpushed-commits report (informational; sync never pushes) ---
+    # Surface AFTER the pulls + applies so the user sees the
+    # "everything else is fine, but you have unpushed work" framing.
+    for repo_spec in profile.repos:
+        report.results.append(ops.check_unpushed(repo_spec))
 
     return report
 

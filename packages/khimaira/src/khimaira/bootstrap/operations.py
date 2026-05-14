@@ -16,9 +16,9 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 
 from khimaira.log import get_logger
@@ -41,12 +41,20 @@ class OpResult:
     `status` drives the CLI's emoji + return code; `detail` is the
     human-readable line that follows. Together they're enough for the
     user to understand what bootstrap did without re-running with -v.
+
+    `meta` is an optional structured payload for ops that need to
+    convey more than a status + line of prose to downstream consumers
+    (e.g. `git_pull_repo` reports commits_pulled + deps_changed so the
+    sync runner can decide whether to fire `uv sync` and how to
+    format the final summary). The CLI renderer never reads meta —
+    it's runner-internal.
     """
 
     op: str
     target: str
     status: OpStatus
     detail: str = ""
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 def _run(
@@ -592,4 +600,221 @@ def sync_dotfiles(spec: DotfilesSpec) -> OpResult:
         target=spec.repo,
         status=status,
         detail=out.split("\n")[-1] if out else "pull completed",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sibling repo sync (git pull + dep-change detection) — task #66
+# ---------------------------------------------------------------------------
+
+
+def _git_head(path: Path) -> str | None:
+    """Return current HEAD sha for path, or None if git lookup fails."""
+    proc = _run(["git", "-C", str(path), "rev-parse", "HEAD"])
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").strip() or None
+
+
+def _deps_touched_between(repo_path: Path, prev_head: str, new_head: str) -> bool:
+    """Return True iff pyproject.toml or uv.lock changed between two SHAs.
+
+    Used to decide whether `khimaira sync` should fire `uv sync` after a
+    pull. False on any git-side error — better to skip the dep refresh
+    than to error out the whole sync.
+    """
+    if prev_head == new_head:
+        return False
+    proc = _run(
+        [
+            "git",
+            "-C",
+            str(repo_path),
+            "diff",
+            "--name-only",
+            f"{prev_head}..{new_head}",
+        ]
+    )
+    if proc.returncode != 0:
+        return False
+    for name in (proc.stdout or "").splitlines():
+        name = name.strip()
+        if name.endswith("pyproject.toml") or name.endswith("uv.lock"):
+            return True
+    return False
+
+
+def git_pull_repo(spec: RepoSpec) -> OpResult:
+    """git fetch + ff-only merge a sibling repo declared in the profile.
+
+    Distinct from `sync_dotfiles`: that's hardcoded to the dotfiles
+    spec; this handles any RepoSpec from `profile.repos`. Used by
+    `khimaira sync` to keep sibling repos current alongside dotfiles.
+
+    Returns an OpResult with `meta` populated:
+      - `commits_pulled`: int — count of new commits merged in
+      - `deps_changed`: bool — pyproject.toml or uv.lock touched
+
+    The sync runner reads `meta` to decide whether to fire
+    `uv sync --all-packages` after all repo pulls complete. The CLI
+    renderer ignores `meta` (only renders status + detail).
+    """
+    path = spec.resolved_path()
+    if not (path / ".git").is_dir():
+        return OpResult(
+            op="repo-pull",
+            target=spec.name,
+            status="skipped",
+            detail=f"no git repo at {path} — run `khimaira bootstrap` first",
+        )
+
+    prev_head = _git_head(path)
+    if prev_head is None:
+        return OpResult(
+            op="repo-pull",
+            target=spec.name,
+            status="failed",
+            detail="couldn't read current HEAD",
+        )
+
+    fetch = _run(["git", "-C", str(path), "fetch", "--quiet"])
+    if fetch.returncode != 0:
+        return OpResult(
+            op="repo-pull",
+            target=spec.name,
+            status="failed",
+            detail=f"git fetch failed: {(fetch.stderr or fetch.stdout).strip()[:300]}",
+        )
+
+    merge = _run(["git", "-C", str(path), "merge", "--ff-only", "FETCH_HEAD"])
+    new_head = _git_head(path) or prev_head
+
+    if prev_head == new_head:
+        return OpResult(
+            op="repo-pull",
+            target=spec.name,
+            status="unchanged",
+            detail="already up to date",
+        )
+
+    if merge.returncode != 0:
+        # FETCH_HEAD diverged from local — would need a real merge or rebase.
+        # Sync's contract is "don't touch local work"; surface + bail.
+        return OpResult(
+            op="repo-pull",
+            target=spec.name,
+            status="failed",
+            detail=(
+                "ff-only merge refused — local has commits not on origin. "
+                f"Resolve manually: cd {path} && git status"
+            ),
+        )
+
+    proc = _run(
+        ["git", "-C", str(path), "rev-list", "--count", f"{prev_head}..{new_head}"]
+    )
+    commits_pulled = 0
+    if proc.returncode == 0:
+        try:
+            commits_pulled = int((proc.stdout or "0").strip())
+        except ValueError:
+            pass
+
+    deps_changed = _deps_touched_between(path, prev_head, new_head)
+
+    detail = f"pulled {commits_pulled} commit(s)"
+    if deps_changed:
+        detail += " · pyproject/uv.lock touched"
+
+    return OpResult(
+        op="repo-pull",
+        target=spec.name,
+        status="updated",
+        detail=detail,
+        meta={"commits_pulled": commits_pulled, "deps_changed": deps_changed},
+    )
+
+
+def check_unpushed(spec: RepoSpec) -> OpResult:
+    """Report whether the repo has commits ahead of its tracking branch.
+
+    Informational only — `khimaira sync` never auto-pushes. The user
+    sees the count and decides whether to push from this machine
+    (e.g. they may want to push from a different machine where the
+    commits originated).
+
+    Status semantics:
+      - `unchanged` — local in sync with upstream (the common case)
+      - `updated` — N commits ahead (would-be-pushed in `--check` view)
+      - `skipped` — no upstream tracking, can't determine
+
+    Never `failed` — an ahead-of-upstream state is not a failure of
+    sync; it's a signal to the user.
+    """
+    path = spec.resolved_path()
+    if not (path / ".git").is_dir():
+        return OpResult(
+            op="unpushed-check",
+            target=spec.name,
+            status="skipped",
+            detail="no git repo",
+        )
+    proc = _run(["git", "-C", str(path), "rev-list", "--count", "@{u}..HEAD"])
+    if proc.returncode != 0:
+        return OpResult(
+            op="unpushed-check",
+            target=spec.name,
+            status="skipped",
+            detail="no upstream tracking branch (or detached HEAD)",
+        )
+    try:
+        ahead = int((proc.stdout or "0").strip())
+    except ValueError:
+        ahead = 0
+    if ahead == 0:
+        return OpResult(
+            op="unpushed-check",
+            target=spec.name,
+            status="unchanged",
+            detail="in sync with origin",
+        )
+    return OpResult(
+        op="unpushed-check",
+        target=spec.name,
+        status="updated",
+        detail=f"{ahead} unpushed commit(s) — push from this machine if origin",
+        meta={"unpushed_count": ahead},
+    )
+
+
+def maybe_run_uv_sync(workspace_root: Path, deps_changed: bool) -> OpResult:
+    """Run `uv sync --all-packages` in workspace_root if deps_changed.
+
+    Called by `khimaira sync` after all repo pulls; deps_changed is
+    True iff at least one pulled repo had pyproject.toml or uv.lock
+    touched.
+
+    Returns `unchanged` (no work) when deps_changed is False — keeps
+    the report a single coherent row instead of an asymmetric branch.
+    """
+    if not deps_changed:
+        return OpResult(
+            op="uv-sync",
+            target="workspace",
+            status="unchanged",
+            detail="no pyproject/uv.lock changes detected",
+        )
+    proc = _run(["uv", "sync", "--all-packages"], cwd=workspace_root)
+    if proc.returncode != 0:
+        return OpResult(
+            op="uv-sync",
+            target="workspace",
+            status="failed",
+            detail=f"uv sync failed: {(proc.stderr or proc.stdout).strip()[:300]}",
+        )
+    return OpResult(
+        op="uv-sync",
+        target="workspace",
+        status="updated",
+        detail="workspace dependencies re-resolved",
     )
