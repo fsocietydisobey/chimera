@@ -516,20 +516,34 @@ def _try_auto_register_from_ppid() -> None:
     lazy-registration step that previously required the agent's first
     chat tool call.
 
-    Side effect: if found, also auto-registers the friendly name (via
-    `-n NAME` detection) — same path as `_state.register()` would
-    take on lazy-register.
+    **Race-tolerant**: the SessionStart hook and this subprocess are both
+    spawned by Claude Code roughly concurrently. If the subprocess wins
+    and queries before the hook's POST lands, the lookup returns null.
+    Retry with backoff over ~3s to absorb that race.
 
-    Best-effort: silent on failure. The agent's first chat tool call
-    is still the fallback.
+    Best-effort: silent on persistent failure. The agent's first chat
+    tool call is still the fallback.
     """
+    import time
+
     try:
         ppid = os.getppid()
-        session_id = daemon_client.lookup_session_by_ppid(ppid)
     except Exception as exc:
         log.warning("khimaira-chat: ppid lookup failed — %s", exc)
         return
+
+    session_id = None
+    for attempt in range(6):  # ~3s total: 0.1+0.2+0.4+0.8+1.5 = ~3s
+        try:
+            session_id = daemon_client.lookup_session_by_ppid(ppid)
+        except Exception:
+            session_id = None
+        if session_id:
+            break
+        time.sleep(0.1 * (2**attempt))
+
     if not session_id:
+        log.info("khimaira-chat: ppid=%s lookup gave no session_id, falling back to lazy", ppid)
         return
     _state.session_id = session_id
     log.info(

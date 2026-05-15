@@ -43,6 +43,44 @@ _ENDPOINT = os.environ.get("KHIMAIRA_ENDPOINT", "http://127.0.0.1:8740").rstrip(
 _HTTP_TIMEOUT_S = 1.5
 
 
+def _ensure_chat_mcp_registered() -> None:
+    """Claude Code's MCP supervisor periodically prunes the khimaira-chat
+    entry (subprocess errors during daemon restart trigger removal).
+    Detect-and-restore: if `claude mcp list` doesn't show it, run
+    `claude mcp add` silently. ~200ms total when entry is present
+    (just one process spawn for the list check).
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["claude", "mcp", "list"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return  # claude CLI not on PATH, or list timed out — nothing we can do
+
+    if "khimaira-chat" in (proc.stdout or ""):
+        return  # already registered
+
+    # Self-heal — match the registration the bootstrap profile uses.
+    try:
+        subprocess.run(
+            [
+                "claude", "mcp", "add", "khimaira-chat", "-s", "user", "--",
+                "bash", "-lc",
+                "uv --directory ~/dev/khimaira run khimaira-chat 2>>/tmp/khimaira-chat.log",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+
 def _http_post_json(path: str, body: dict) -> dict | None:
     """POST JSON to <endpoint>/<path>; return parsed response or None.
 
@@ -597,6 +635,19 @@ def main() -> int:
             "/api/chats/register-pending-session",
             {"ppid": os.getppid(), "session_id": session_id},
         )
+    except Exception:
+        pass
+
+    # v1.3 self-heal: Claude Code intermittently prunes the
+    # khimaira-chat MCP entry from ~/.claude.json (subprocess crash
+    # during daemon restart, supervisor health-check, or some other
+    # unknown trigger). Manual `khimaira sync` is the workaround but
+    # it's friction. Auto-detect-and-restore here so each fresh
+    # `claude-chat` launch self-heals: if `claude mcp list` doesn't
+    # show khimaira-chat, run the registration command silently.
+    # Best-effort, must never block session boot.
+    try:
+        _ensure_chat_mcp_registered()
     except Exception:
         pass
 
