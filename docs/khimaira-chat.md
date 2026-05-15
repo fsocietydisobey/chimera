@@ -558,7 +558,7 @@ stateDiagram-v2
 
 ### The role model
 
-**Master** = chat creator. The room's `meta.created_by` is the implicit master in Phase B v1; only this session can approve or request changes. (v2 could lift this to an explicit `roles: {sid: "master" | "agent" | "observer"}` field on `room.meta` for multi-master or non-creator-led chats — out of scope for v1.)
+**Master** = chat creator by default. Chats are created with `room.meta.member_roles = {creator_id: "master"}`; only the holder of the `master` role can approve or request changes on tasks. Phase B v2 (commit `29d901e`) lifted this from implicit-only to an explicit `room.meta.member_roles: dict[session_id, "master" | "agent" | "observer" | "critic"]` field, with `chat_grant_role(target, role)` as the atomic lift primitive (atomically demotes the prior master when promoting a new one, preserving the single-master invariant) and `chat_set_creator` as an admin orphan-unlock primitive for chats orphaned by pre-v1.3 `chat_transfer_membership`. See [`tasks/khimaira-chat/PHASE-B-V2-ROLES-AUDIT.md`](../tasks/khimaira-chat/PHASE-B-V2-ROLES-AUDIT.md) for canonical context.
 
 **Assignee** = the session named in `chat_task_create(..., assignee=<name_or_uuid>)`. Drives `pending → in_progress → done`. Optional — if you omit it, the task is open.
 
@@ -664,6 +664,54 @@ Phase B+ items still in [`tasks/khimaira-chat/PHASE-B-VISION.md`](../tasks/khima
 - **Future-session invites** — invite a session NAME that doesn't exist yet; daemon queues the invite, fires it when a session registers under that name.
 - **Phantom-truncation across hops** — when one agent receives a truncated body and re-relays, the cut propagates silently. Mitigations under discussion.
 - **Trust + identity (Phase C seed)** — cryptographic peer identity to harden the auto-accept allowlist's name-collision caveat. Deferred — the single-user local-daemon model doesn't need it yet.
+
+## Token-cost budgeting
+
+*— convention layer added 2026-05-15 (Phase B v1.4) to mitigate rate-limit blowups during multi-agent dogfood rounds*
+
+Multi-agent chats are token-expensive in a way single-agent sessions aren't. Every peer in a chat consumes its own context window per turn, and master/agent flows fan out — one orchestrator's review request lands as a turn in N agents simultaneously. Without per-role budget routing, a four-peer chat running all-Opus-with-ultrathink can burn through a daily usage cap in a single coordination round.
+
+Two compounding dimensions matter:
+
+- **Model gap**: ~5× cost difference Opus 4.7 → Sonnet 4.6; ~10-20× Opus 4.7 → Haiku 4.5.
+- **Thinking-budget gap**: ~10-50× ultrathink ↔ no-thinking AT THE SAME MODEL. Thinking is often the larger lever, and it compounds with the model gap.
+
+A naive all-Opus-ultrathink chat with 1 master + 3 agents + 1 observer can cost roughly 100× the same workflow routed by role. The recommendation below is the cheapest shape that preserves quality where it matters (orchestration design, implementation deliberation, review).
+
+### Recommended budget per role
+
+| Role     | Model       | Thinking                  |
+|----------|-------------|---------------------------|
+| Master   | Opus 4.7    | ultrathink / think harder |
+| Agent    | Sonnet 4.6  | think (short budget)      |
+| Observer | Haiku 4.5   | default / none            |
+
+The role labels match the `member_roles` enum values from Phase B v2 exactly (`master | agent | observer | critic`). Critic is intentionally absent from the defaults — the right budget depends on what's being critiqued; see "When to deviate" below.
+
+### How it composes with member_roles
+
+This is convention, not enforcement. `member_roles` (Phase B v2) is the canonical role key but carries no budget hint — agent processes pick their model and thinking-mode at session start, before they know what role they'll hold in a given chat. The convention lives in the orchestrator's setup: when spinning up a worker session, pick its budget from the role you intend to grant it.
+
+Future versions could lift this to a code-enforced `recommended_budget` hint on `chat_task_create` or `chat_grant_role`, letting the daemon signal budget alongside role. Not designed yet — v1.4 is convention-only, and the lift only makes sense if a forcing function appears (e.g., usage data shows the convention isn't enough on its own).
+
+### Surfaces wiring
+
+Three places carry the convention forward without code changes:
+
+- **`/khimaira-orchestrate` kickoff brief** surfaces a one-line summary plus a pointer to this section in the templated brief, so peers know their lane's recommended budget at the moment they accept the invite.
+- **`/khimaira-transfer-session` handoff body** captures the donor's actual model + thinking-mode and propagates it to the recipient, who inherits master role by default and matches (or deliberately diverges from) the donor's budget.
+- This section is the canonical reference both link back to.
+
+### When to deviate
+
+The table is defaults, not law. Some lanes warrant divergence:
+
+- **Observer doing real analysis** (code review with judgment, not pass-through ack) → bump to Sonnet. Haiku is fine for "I see what you shipped, ack" but underpowered for "is this safe under concurrent writes."
+- **Master in a tight mechanical lane** (e.g., assembling a bundle commit from already-greenlit lanes, running `git status` + commit + push) → drop to Sonnet + think. Opus + ultrathink is overkill for fully-specified work.
+- **Agent on a deep design question** → promote to Opus, possibly with `think harder`. The `agent` role doesn't preclude deliberative work; it's just the default for bounded implementation lanes.
+- **Critic** has no default row because critics do anything from "spot-check a one-line fix" (Haiku) to "audit a refactor for cross-cutting consequences" (Opus). Pick based on the scope of what they're critiquing.
+
+The decision rule: budget tracks deliberation depth, not role label. The role table is a useful default precisely because most lanes match the pattern. When the lane doesn't, deviate.
 
 ## References
 
