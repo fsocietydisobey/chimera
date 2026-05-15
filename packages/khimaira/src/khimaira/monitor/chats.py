@@ -1007,6 +1007,8 @@ def transfer_membership(
     chat_id: str,
     from_session_id: str,
     to_session_id: str,
+    *,
+    as_deputize: bool = False,
 ) -> dict[str, Any]:
     """Hand `from`'s chat membership to `to`, preserving full history.
 
@@ -1023,6 +1025,31 @@ def transfer_membership(
     updated to `to`. Without this, the successor inherits membership but
     not approval-gating rights (chat_task_update done→approved checks
     `room.meta.created_by`). Non-creator transfers leave META alone.
+
+    **Phase B v1.6 deputize marker (`as_deputize=True`):** two effects,
+    both load-bearing for the pause-and-handoff semantic.
+
+    1. The same creator-transfer META mutation ALSO sets
+       `meta.deputized_original_master = from_session_id`. `chat_resume_master`
+       reads this field on resume to validate the caller is the original
+       donor and atomically swap master role back. The kwarg also forces
+       `member_roles` materialization (even on v1-era chats) so the resume
+       primitive doesn't need fallback logic.
+
+    2. The donor's `TRANSFERRED_OUT` MEMBER write is SKIPPED — donor stays
+       in state ACCEPTED throughout the deputize→resume cycle. This is
+       LOCK v3 Decision 10: deputize is a pause, not a goodbye;
+       TRANSFERRED_OUT means "permanent departure" and using it for a
+       reversible pause produces a wrong-shape state that breaks `chat_send`
+       and `_broadcast` (both gate on ACCEPTED) for the donor post-resume.
+       Vice's `ACCEPTED` MEMBER write happens unchanged — vice still needs
+       to be added to the chat.
+
+    Atomic with the transfer; no inconsistent intermediate state. Non-creator
+    transfers or `as_deputize=False` (default) preserve the original terminal-
+    handoff semantics (donor → TRANSFERRED_OUT, no marker written). Pairs
+    with `/khimaira-deputize` (skill) on the write side and
+    `chat_resume_master` (this module) on the read+clear side.
 
     State transitions are passive: the `state != ACCEPTED` gate in
     `_broadcast` and `send_message` handles cutoff — no special teardown.
@@ -1081,13 +1108,28 @@ def transfer_membership(
         # explicit, demote the old creator to agent and promote the new
         # creator to master in the same write.
         member_roles = dict(existing_meta.get("member_roles") or {})
-        if member_roles:
-            # Explicit dict pre-existed: demote from-creator (if they had
-            # master), promote to-creator.
+        if member_roles or as_deputize:
+            # Explicit dict pre-existed OR we're entering deputize mode:
+            # materialize the master swap into member_roles explicitly.
+            # For deputize, this is load-bearing — chat_resume_master
+            # reads member_roles to find the current master on resume;
+            # leaving it implicit via created_by would require the resume
+            # primitive to special-case v1-era fallback logic.
             if member_roles.get(from_session_id) == ROLE_MASTER:
+                member_roles[from_session_id] = ROLE_AGENT
+            elif as_deputize and not member_roles:
+                # First-time materialization on a v1-era chat entering
+                # deputize. The donor was implicit-master via created_by;
+                # mark them explicitly as agent (post-swap).
                 member_roles[from_session_id] = ROLE_AGENT
             member_roles[to_session_id] = ROLE_MASTER
             creator_meta_update["member_roles"] = member_roles
+        # Phase B v1.6 deputize marker: when caller requests as_deputize,
+        # mark the chat as in deputize mode atomically with the
+        # creator-transfer META mutation. `chat_resume_master` reads this
+        # field to validate the resumption and atomic-swap back.
+        if as_deputize:
+            creator_meta_update["deputized_original_master"] = from_session_id
 
     out_record = {
         "kind": MEMBER,
@@ -1112,6 +1154,20 @@ def transfer_membership(
         "transferred_from": from_session_id,
         "transfer_id": transfer_id,
     }
+    # Phase B v1.6 LOCK v3 Decision 10: under as_deputize=True, the donor
+    # stays ACCEPTED throughout the pause-and-handoff cycle. TRANSFERRED_OUT
+    # semantically means "permanent goodbye"; deputize is non-permanent.
+    # The sys_msg body and meta.event_type also shift to reflect the
+    # pause semantics so the audit trail is honest about what happened.
+    if as_deputize:
+        sys_msg_body = (
+            f"📦 {from_name} deputized this chat to {to_name} "
+            f"— pause-and-handoff; resume via /khimaira-resume"
+        )
+        sys_msg_event_type = "deputize"
+    else:
+        sys_msg_body = f"📦 {from_name} transferred this chat to {to_name} — full context handoff"
+        sys_msg_event_type = "transfer"
     sys_msg = {
         "kind": MSG,
         "event_id": _new_event_id(),
@@ -1120,10 +1176,10 @@ def transfer_membership(
         "chat_id": chat_id,
         "sender_id": SYSTEM_SENDER_ID,
         "sender_name": SYSTEM_SENDER_ID,
-        "body": f"📦 {from_name} transferred this chat to {to_name} — full context handoff",
+        "body": sys_msg_body,
         "to": None,
         "meta": {
-            "event_type": "transfer",
+            "event_type": sys_msg_event_type,
             "transfer_id": transfer_id,
             "from": from_session_id,
             "to": to_session_id,
@@ -1131,7 +1187,12 @@ def transfer_membership(
     }
     if creator_meta_update is not None:
         _append(chat_id, creator_meta_update)
-    _append(chat_id, out_record)
+    # Skip donor's TRANSFERRED_OUT MEMBER write under as_deputize=True —
+    # donor's chat membership is preserved (state stays ACCEPTED) because
+    # the deputize is a pause, not a permanent departure. chat_resume_master
+    # restores their master role; their MEMBER state never needed mutation.
+    if not as_deputize:
+        _append(chat_id, out_record)
     _append(chat_id, in_record)
     _append(chat_id, sys_msg)
     # Phase B v1.5: if this transfer was a master-swap (creator handoff), the
@@ -1343,6 +1404,146 @@ def chat_grant_role(
         " (first explicit write — materialized implicit master)" if first_explicit_write else "",
     )
     return new_meta
+
+
+def chat_resume_master(
+    chat_id: str,
+    by_session_id: str,
+    *,
+    demote_to: str = ROLE_AGENT,
+) -> dict[str, Any]:
+    """Phase B v1.6: restore master role to the original master after a
+    deputize swap.
+
+    Admin-style restoration analogous to v2's `chat_set_creator` (which
+    unlocks orphaned chats). Where `chat_set_creator` recovers from a
+    pre-v1.3 transfer that left no surviving accepted creator,
+    `chat_resume_master` reverses a deliberate `as_deputize=True`
+    transfer where the original master is paused, awaiting their return.
+
+    Validates: `room.meta.deputized_original_master` is set AND equals
+    `by_session_id`. Atomically swaps current master (the vice) back to
+    `by_session_id`; v1.5 directive emit fires for both sides (caller →
+    master, vice → `demote_to` default agent). Clears
+    `meta.deputized_original_master` and `member_roles[vice]` entry
+    (demoted to `demote_to`) and `member_roles[by_session_id]` (= master)
+    in the same META write.
+
+    `created_by` swaps back to `by_session_id` as well — keeps the
+    v1.3-established invariant that `created_by` tracks the current
+    master across atomic swaps.
+
+    Raises ValueError if:
+      - chat is not currently deputized (no `deputized_original_master` field)
+      - caller is not the recorded original master per that field
+      - `demote_to` is not in _VALID_ROLES
+      - `demote_to == ROLE_MASTER` (closes the quorum loophole, mirrors
+        chat_grant_role)
+    """
+    if demote_to not in _VALID_ROLES:
+        raise ValueError(f"Invalid demote_to {demote_to!r}. Valid roles: {sorted(_VALID_ROLES)}.")
+    if demote_to == ROLE_MASTER:
+        raise ValueError(
+            "demote_to cannot be 'master' — single-master-with-delegation "
+            "invariant requires at most one session holds master at a time."
+        )
+
+    by_session_id = _resolve_or_uuid(by_session_id)
+    room = load_room(chat_id)
+    existing_meta = dict(room.get("meta") or {})
+    deputized_donor = existing_meta.get("deputized_original_master")
+
+    if deputized_donor is None:
+        raise ValueError(
+            f"Chat {chat_id!r} is not in deputize mode "
+            f"(no meta.deputized_original_master set); cannot resume master role."
+        )
+    if deputized_donor != by_session_id:
+        raise ValueError(
+            f"Session {by_session_id!r} is not the original master of {chat_id!r} "
+            f"(recorded: {deputized_donor!r}); only the original master can resume."
+        )
+
+    # Find current master from member_roles (post-deputize this is the vice).
+    member_roles = dict(existing_meta.get("member_roles") or {})
+    current_master = None
+    for sid, r in member_roles.items():
+        if r == ROLE_MASTER:
+            current_master = sid
+            break
+    if current_master is None:
+        # Defensive: shouldn't happen post-deputize (transfer_membership
+        # sets member_roles[to_session_id] = ROLE_MASTER). If it does,
+        # the donor (caller) is being restored as master without an
+        # explicit demote step.
+        log.warning(
+            "chats: resume_master found no current master in member_roles "
+            "for chat=%s; promoting donor without explicit demote",
+            chat_id,
+        )
+
+    # Atomic swap: demote current master (vice), promote donor.
+    if current_master and current_master != by_session_id:
+        member_roles[current_master] = demote_to
+    member_roles[by_session_id] = ROLE_MASTER
+
+    # Determine donor's display name for created_by_name update.
+    donor_name = _resolve_session_name(by_session_id) or by_session_id[:8]
+    ts = _now_iso()
+
+    new_meta = {
+        **existing_meta,
+        "kind": META,
+        "event_id": _new_event_id(),
+        "ts": ts,
+        "member_roles": member_roles,
+        "created_by": by_session_id,
+        "created_by_name": donor_name,
+    }
+    # Clear the deputize marker — chat is no longer in deputize mode.
+    new_meta.pop("deputized_original_master", None)
+
+    _append(chat_id, new_meta)
+
+    # Phase B v1.5 role-directive emits: caller becomes master, vice
+    # (if any) demotes to `demote_to`. Shared ts for audit pairing.
+    _emit_role_directive(chat_id, by_session_id, ROLE_MASTER, ts=ts)
+    if current_master and current_master != by_session_id:
+        _emit_role_directive(chat_id, current_master, demote_to, ts=ts)
+
+    log.info(
+        "chats: resume_master chat=%s donor=%s demoted_vice=%s",
+        chat_id,
+        by_session_id,
+        current_master if current_master and current_master != by_session_id else "(none)",
+    )
+    return new_meta
+
+
+def find_chats_deputized_by(by_session_id: str) -> list[str]:
+    """Phase B v1.6: list chat_ids where `by_session_id` is the recorded
+    original master in deputize mode.
+
+    Used by `/khimaira-resume` to enumerate which chats the caller is
+    currently awaiting resume on. Scans the chat directory; for each
+    chat, reads META and checks `deputized_original_master == by_session_id`.
+
+    Returns chat_ids in arbitrary order. Empty list if no chats are
+    deputized by this session.
+    """
+    by_session_id = _resolve_or_uuid(by_session_id)
+    out: list[str] = []
+    if not _chat_dir().exists():
+        return out
+    for path in _chat_dir().glob("chat-*.jsonl"):
+        chat_id = path.stem
+        try:
+            room = load_room(chat_id)
+        except ValueError:
+            continue
+        if room["meta"].get("deputized_original_master") == by_session_id:
+            out.append(chat_id)
+    return out
 
 
 def delete(chat_id: str, by_session_id: str) -> dict[str, Any]:

@@ -1762,3 +1762,430 @@ def test_transfer_membership_non_master_emits_no_directive(isolated_chats):
     assert len(_directives(c, chat_id)) == pre_count, (
         "non-master transfer must NOT emit a role directive"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.6: chat_resume_master + as_deputize kwarg + find_chats_deputized_by
+# ---------------------------------------------------------------------------
+
+
+def test_transfer_membership_as_deputize_sets_meta_field(isolated_chats):
+    """v1.6 kwarg path: `as_deputize=True` on a creator-transfer writes
+    `meta.deputized_original_master = from_session_id` atomically with
+    the master-role swap."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "vice", "vice")
+    room = c.create_room("alice", ["bob"], title="t")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+
+    c.transfer_membership(chat_id, "alice", "vice", as_deputize=True)
+
+    room = c.load_room(chat_id)
+    assert room["meta"]["deputized_original_master"] == "alice"
+    assert room["meta"]["created_by"] == "vice"
+    assert room["meta"]["member_roles"]["vice"] == c.ROLE_MASTER
+
+
+def test_chat_resume_master_clears_meta_and_swaps_roles(isolated_chats):
+    """Happy path: deputize via kwarg → resume primitive → field cleared,
+    member_roles swapped, created_by restored to donor.
+
+    Phase B v1.6 LOCK v3 Decision 10: also asserts donor's MEMBER state
+    stays ACCEPTED throughout the deputize→resume cycle. The bug this
+    caught: pre-LOCK-v3, donor was marked TRANSFERRED_OUT on deputize,
+    breaking chat_send/broadcast post-resume even though member_roles
+    correctly restored master. State-surfaces test coverage rule: assert
+    on ALL state surfaces the primitive touches, not just the primary one.
+    """
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "vice", "vice")
+    room = c.create_room("alice", ["bob"], title="t")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+
+    c.transfer_membership(chat_id, "alice", "vice", as_deputize=True)
+    pre = c.load_room(chat_id)
+    assert pre["meta"]["deputized_original_master"] == "alice"
+    # LOCK v3 D10: donor stays ACCEPTED during the pause.
+    assert pre["members"]["alice"]["state"] == c.ACCEPTED
+    assert pre["members"]["vice"]["state"] == c.ACCEPTED
+
+    c.chat_resume_master(chat_id, "alice")
+
+    post = c.load_room(chat_id)
+    assert post["meta"].get("deputized_original_master") is None
+    assert post["meta"]["member_roles"]["alice"] == c.ROLE_MASTER
+    assert post["meta"]["member_roles"]["vice"] == c.ROLE_AGENT
+    assert post["meta"]["created_by"] == "alice"
+    # Post-resume: donor + vice both still ACCEPTED. Donor can chat_send.
+    assert post["members"]["alice"]["state"] == c.ACCEPTED
+    assert post["members"]["vice"]["state"] == c.ACCEPTED
+
+
+def test_chat_resume_master_rejects_non_original_master(isolated_chats):
+    """Authority check: only the recorded `deputized_original_master`
+    can resume. Field-value-based gating per LOCK v2 Decision 1."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "vice", "vice")
+    room = c.create_room("alice", ["bob"], title="t")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+    c.transfer_membership(chat_id, "alice", "vice", as_deputize=True)
+
+    with pytest.raises(ValueError, match="not the original master"):
+        c.chat_resume_master(chat_id, "bob")
+    with pytest.raises(ValueError, match="not the original master"):
+        c.chat_resume_master(chat_id, "vice")
+
+
+def test_chat_resume_master_rejects_when_not_deputized(isolated_chats):
+    """Chat without `deputized_original_master` → reject."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    room = c.create_room("alice", ["bob"], title="t")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+
+    with pytest.raises(ValueError, match="not in deputize mode"):
+        c.chat_resume_master(chat_id, "alice")
+
+
+def test_find_chats_deputized_by_returns_only_donors_chats(isolated_chats):
+    """Filter precision: returns ONLY chats where caller is the recorded
+    original master."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    for sid in ("alice", "bob", "carol", "vice1", "vice2"):
+        _make_session(sessions_mod, sid, sid)
+
+    r1 = c.create_room("alice", ["bob"], title="A1")
+    chat_a1 = r1["meta"]["chat_id"]
+    c.accept(chat_a1, "bob")
+    c.transfer_membership(chat_a1, "alice", "vice1", as_deputize=True)
+
+    r2 = c.create_room("alice", ["carol"], title="A2")
+    chat_a2 = r2["meta"]["chat_id"]
+    c.accept(chat_a2, "carol")
+    c.transfer_membership(chat_a2, "alice", "vice2", as_deputize=True)
+
+    r3 = c.create_room("alice", ["bob"], title="A3", fresh=True)
+    chat_a3 = r3["meta"]["chat_id"]
+    c.accept(chat_a3, "bob")
+
+    r4 = c.create_room("bob", ["carol"], title="B1")
+    chat_b1 = r4["meta"]["chat_id"]
+    c.accept(chat_b1, "carol")
+    c.transfer_membership(chat_b1, "bob", "vice1", as_deputize=True)
+
+    alice_deputized = set(c.find_chats_deputized_by("alice"))
+    assert alice_deputized == {chat_a1, chat_a2}
+    assert chat_a3 not in alice_deputized
+    assert chat_b1 not in alice_deputized
+    assert c.find_chats_deputized_by("bob") == [chat_b1]
+    assert c.find_chats_deputized_by("carol") == []
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.6 L4: integration / round-trip / composition tests for deputize
+# ---------------------------------------------------------------------------
+# These tests sit on top of L2's primitive-level coverage (test_*_as_deputize_*,
+# test_chat_resume_master_*, test_find_chats_deputized_by_*). They exercise
+# state surfaces that primitive-level tests have a structural blind spot for —
+# per the N-state-surfaces principle banked in Round 10: when a primitive
+# writes to N surfaces (META, MEMBER, sys_msg, directive emit, send rights),
+# tests must assert on ALL N, not just the primary one. L4-level coverage
+# catches composition gaps that show up only at integration time.
+
+
+def test_transfer_membership_as_deputize_keeps_donor_accepted(isolated_chats):
+    """LOCK v3 Decision 10 primary surface coverage: `as_deputize=True`
+    must NOT flip donor to TRANSFERRED_OUT. Donor stays ACCEPTED throughout
+    the pause so chat_send remains valid post-resume.
+
+    Pre-LOCK-v3, the kwarg used the same out_record write as a regular
+    terminal transfer — donor went to TRANSFERRED_OUT on deputize. The
+    resume primitive correctly restored master in member_roles but didn't
+    touch MEMBER state, so post-resume the donor held master role yet
+    couldn't chat_send (send_message gates on state == ACCEPTED).
+
+    test-agent's `test_chat_resume_master_clears_meta_and_swaps_roles`
+    asserts donor.state == ACCEPTED via the round-trip; this test pins
+    the same contract directly on the transfer-side primitive — focused
+    coverage on the kwarg's MEMBER-state effect.
+    """
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "vice", "vice")
+
+    room = c.create_room("alice", ["bob"], title="t")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+
+    c.transfer_membership(chat_id, "alice", "vice", as_deputize=True)
+
+    fresh = c.load_room(chat_id)
+    assert fresh["members"]["alice"]["state"] == c.ACCEPTED, (
+        "as_deputize=True must preserve donor's ACCEPTED state (LOCK v3 D10)"
+    )
+    assert fresh["members"]["vice"]["state"] == c.ACCEPTED
+    # Sanity: the marker still landed (kwarg's primary META effect).
+    assert fresh["meta"]["deputized_original_master"] == "alice"
+    # Donor can still chat_send during the pause (the actual feature
+    # concern Decision 10 protects).
+    sent = c.send_message(chat_id, "alice", "still here, just paused")
+    assert sent["body"] == "still here, just paused"
+
+
+def test_transfer_membership_default_does_not_set_meta_field(isolated_chats):
+    """Defensive: the deputize marker must NOT land on regular (non-deputize)
+    transfers. Pins the kwarg's gating from the opposite direction —
+    test-agent's `test_transfer_membership_as_deputize_sets_meta_field`
+    asserts the marker IS written when asked; this asserts the marker is
+    NOT written when not asked, preventing a future refactor from
+    accidentally writing the field unconditionally and breaking the v1.2
+    terminal-handoff semantic.
+    """
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "dave", "dave")
+
+    room = c.create_room("alice", ["bob"], title="t")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+
+    # Default invocation: kwarg omitted (as_deputize=False implicit).
+    c.transfer_membership(chat_id, "alice", "dave")
+
+    fresh = c.load_room(chat_id)
+    assert "deputized_original_master" not in fresh["meta"], (
+        "regular transfer (as_deputize=False) must not write the deputize marker"
+    )
+    # Sanity: regular terminal transfer still flips donor to TRANSFERRED_OUT.
+    # The kwarg's two effects (marker + skip-out) are both gated; without
+    # the kwarg, neither fires.
+    assert fresh["members"]["alice"]["state"] == c.TRANSFERRED_OUT
+
+
+def test_deputize_resume_round_trip_single_chat_full_state(isolated_chats):
+    """Integration round-trip with full state-surface assertions.
+
+    Per the N-state-surfaces principle: a primitive that touches META,
+    MEMBER, sys_msg, role_directive emit, AND send-rights needs assertions
+    on ALL FIVE at each round-trip checkpoint. This test pins the v1.6
+    deputize→resume cycle's full contract in one place:
+
+    - donor + vice MEMBER state at create / mid-deputize / post-resume
+    - meta.deputized_original_master round-trip (set, then cleared)
+    - meta.created_by swap (donor → vice → donor)
+    - meta.member_roles symmetric atomic swap
+    - role_directive emit count + targets at each phase (3 phases × distinct counts)
+    - sys_msg.event_type = "deputize" on the kwarg-flavored transfer
+    - donor's chat_send rights restored post-resume (the actual feature concern)
+    """
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "vice", "vice")
+
+    room = c.create_room("alice", ["bob"], title="t")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+
+    # Phase 0 — baseline. One directive (master to creator alice on create_room).
+    baseline = _directives(c, chat_id)
+    assert len(baseline) == 1
+    assert baseline[0]["to"] == ["alice"]
+    assert baseline[0]["meta"]["role"] == c.ROLE_MASTER
+
+    # Phase 1 — deputize.
+    c.transfer_membership(chat_id, "alice", "vice", as_deputize=True)
+    mid = c.load_room(chat_id)
+
+    assert mid["meta"]["deputized_original_master"] == "alice"
+    assert mid["meta"]["created_by"] == "vice"
+    assert mid["meta"]["member_roles"]["alice"] == c.ROLE_AGENT
+    assert mid["meta"]["member_roles"]["vice"] == c.ROLE_MASTER
+    assert mid["members"]["alice"]["state"] == c.ACCEPTED  # LOCK v3 D10
+    assert mid["members"]["vice"]["state"] == c.ACCEPTED
+
+    # One new directive fired: vice → master (v1.5 creator-transfer emit).
+    mid_directives = _directives(c, chat_id)
+    assert len(mid_directives) == 2
+    assert mid_directives[-1]["to"] == ["vice"]
+    assert mid_directives[-1]["meta"]["role"] == c.ROLE_MASTER
+
+    # sys_msg for the deputize uses event_type="deputize" + the
+    # pause-and-handoff body text (LOCK v3 D10 bonus refinement).
+    deputize_sys = [
+        m
+        for m in c.history(chat_id, "alice")
+        if m.get("sender_id") == c.SYSTEM_SENDER_ID
+        and (m.get("meta") or {}).get("event_type") == "deputize"
+    ]
+    assert len(deputize_sys) == 1
+    assert "deputized this chat" in deputize_sys[0]["body"]
+    assert "pause-and-handoff" in deputize_sys[0]["body"]
+
+    # Phase 2 — resume.
+    c.chat_resume_master(chat_id, "alice")
+    post = c.load_room(chat_id)
+
+    assert "deputized_original_master" not in post["meta"]
+    assert post["meta"]["created_by"] == "alice"
+    assert post["meta"]["member_roles"]["alice"] == c.ROLE_MASTER
+    assert post["meta"]["member_roles"]["vice"] == c.ROLE_AGENT
+    assert post["members"]["alice"]["state"] == c.ACCEPTED
+    assert post["members"]["vice"]["state"] == c.ACCEPTED
+
+    # Two new directives fired: alice → master, vice → agent.
+    post_directives = _directives(c, chat_id)
+    assert len(post_directives) == 4
+    swap_directives = post_directives[2:]
+    by_target = {d["to"][0]: d for d in swap_directives}
+    assert by_target["alice"]["meta"]["role"] == c.ROLE_MASTER
+    assert by_target["alice"]["meta"]["model"] == "opus"
+    assert by_target["vice"]["meta"]["role"] == c.ROLE_AGENT
+    assert by_target["vice"]["meta"]["model"] == "sonnet"
+
+    # The composition-level concern: donor can chat_send post-resume.
+    sent = c.send_message(chat_id, "alice", "back in the saddle")
+    assert sent["body"] == "back in the saddle"
+
+
+def test_deputize_resume_round_trip_multi_chat(isolated_chats):
+    """Spec test #4 explicit: donor in N chats, deputize all, resume all,
+    no cross-chat state leakage.
+
+    Also stress-tests `find_chats_deputized_by` mid-cycle: after N deputize
+    transfers, the helper returns those N; after a partial resume of one,
+    the helper returns the remaining N-1. The slash command iterates over
+    chats per deputize+resume; this test verifies the per-chat primitive
+    composes without cross-chat coupling.
+    """
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    for sid in ("alice", "bob", "carol", "dave", "vice"):
+        _make_session(sessions_mod, sid, sid)
+
+    # Create 3 distinct chats alice is master in (distinct member sets
+    # so derive_chat_id doesn't collide).
+    chat_ids = []
+    for peer, title in (("bob", "ops"), ("carol", "design"), ("dave", "review")):
+        r = c.create_room("alice", [peer], title=title)
+        cid = r["meta"]["chat_id"]
+        c.accept(cid, peer)
+        chat_ids.append(cid)
+
+    # Deputize all 3 to the same vice.
+    for cid in chat_ids:
+        c.transfer_membership(cid, "alice", "vice", as_deputize=True)
+
+    # find_chats_deputized_by returns exactly the 3 deputized chats.
+    assert set(c.find_chats_deputized_by("alice")) == set(chat_ids)
+
+    # Each chat has the marker; alice ACCEPTED + agent; vice ACCEPTED + master.
+    for cid in chat_ids:
+        r = c.load_room(cid)
+        assert r["meta"]["deputized_original_master"] == "alice"
+        assert r["meta"]["member_roles"]["alice"] == c.ROLE_AGENT
+        assert r["meta"]["member_roles"]["vice"] == c.ROLE_MASTER
+        assert r["members"]["alice"]["state"] == c.ACCEPTED
+        assert r["members"]["vice"]["state"] == c.ACCEPTED
+
+    # Partial resume — just the first chat. Helper reflects in-flight state.
+    c.chat_resume_master(chat_ids[0], "alice")
+    assert set(c.find_chats_deputized_by("alice")) == set(chat_ids[1:])
+
+    # Resumed chat: clean; donor back to master.
+    r0 = c.load_room(chat_ids[0])
+    assert "deputized_original_master" not in r0["meta"]
+    assert r0["meta"]["member_roles"]["alice"] == c.ROLE_MASTER
+    assert r0["meta"]["member_roles"]["vice"] == c.ROLE_AGENT
+    # Other chats unaffected by the partial resume — still deputized.
+    for cid in chat_ids[1:]:
+        r = c.load_room(cid)
+        assert r["meta"]["deputized_original_master"] == "alice"
+        assert r["meta"]["member_roles"]["vice"] == c.ROLE_MASTER
+
+    # Resume the rest.
+    for cid in chat_ids[1:]:
+        c.chat_resume_master(cid, "alice")
+
+    # All chats now clean; helper returns empty.
+    assert c.find_chats_deputized_by("alice") == []
+    for cid in chat_ids:
+        r = c.load_room(cid)
+        assert "deputized_original_master" not in r["meta"]
+        assert r["meta"]["member_roles"]["alice"] == c.ROLE_MASTER
+
+
+def test_non_creator_transfer_silently_ignores_as_deputize_marker(isolated_chats):
+    """Subtle composition gap: the as_deputize=True kwarg has TWO effects
+    that are gated DIFFERENTLY in `transfer_membership`:
+
+    - **marker write** (`meta.deputized_original_master`) — gated inside
+      the creator-transfer branch (only fires if `from` is the chat creator).
+    - **skip donor out_record** — gated outside the creator branch
+      (fires regardless of creator status whenever as_deputize=True).
+
+    A non-creator transfer with as_deputize=True therefore: writes NO marker
+    but DOES skip the donor's TRANSFERRED_OUT write. The /khimaira-deputize
+    skill only ever invokes as_deputize=True on master-chats so this misuse
+    is only reachable via direct Python API. Pin the asymmetric semantic
+    so a future refactor that "fixes" the silence (e.g., by raising on
+    non-creator misuse, or by widening the marker-write gate) doesn't
+    break the slash command's reliance on the current behavior.
+    """
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "vice", "vice")
+
+    # alice creates; bob accepts. bob is non-creator.
+    room = c.create_room("alice", ["bob"], title="t")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+
+    # Non-creator bob transfers with as_deputize=True. Should succeed but:
+    # - NOT write the deputize marker (creator-branch-gated effect)
+    # - DOES skip bob's TRANSFERRED_OUT MEMBER write (outside-creator-branch effect)
+    c.transfer_membership(chat_id, "bob", "vice", as_deputize=True)
+
+    fresh = c.load_room(chat_id)
+    # Marker absent — kwarg silently no-ops on the marker for non-creator.
+    assert "deputized_original_master" not in fresh["meta"]
+    # Creator unchanged — alice still owns master role.
+    assert fresh["meta"]["created_by"] == "alice"
+    # Skip-out-record effect still applied — bob stays ACCEPTED.
+    assert fresh["members"]["bob"]["state"] == c.ACCEPTED, (
+        "as_deputize=True's skip-donor-out applies regardless of creator status"
+    )
+    assert fresh["members"]["vice"]["state"] == c.ACCEPTED

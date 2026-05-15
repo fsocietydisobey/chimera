@@ -698,12 +698,13 @@ Future versions could lift this to a fully-programmatic switch — either via a 
 
 ### Surfaces wiring
 
-Four places carry the convention forward:
+Five places carry the convention forward:
 
 - **`/khimaira-orchestrate` kickoff brief** (convention, Phase B v1.4) — surfaces a one-line summary plus a pointer to this section in the templated brief, so peers know their lane's recommended budget at the moment they accept the invite.
 - **`/khimaira-transfer-session` handoff body** (convention, Phase B v1.4) — captures the donor's actual model + thinking-mode and propagates it to the recipient, who inherits master role by default and matches (or deliberately diverges from) the donor's budget.
 - **Channel-block role directive** (just-in-time recommendation, Phase B v1.5) — see [Role-grant directive](#role-grant-directive) below. Fires automatically at every role-change point; recipient applies via user-typed `/model` and `/effort`.
-- This section is the canonical reference all three surfaces link back to.
+- **`/khimaira-deputize` + `/khimaira-resume`** (Phase B v1.6) — pause-and-handoff orchestration for when the master is about to be busy. The deputize command transfers master role to a freshly-spawned vice via `chat_transfer_membership`, which automatically triggers the v1.5 directive emit for the new master-tier budget. See [Deputy / vice](#phase-b-v16-deputy--vice--pause-and-handoff-orchestration) below.
+- This section is the canonical reference all four surfaces link back to.
 
 ### Role-grant directive
 
@@ -738,6 +739,68 @@ The table is defaults, not law. Some lanes warrant divergence:
 - **Critic** has no default row because critics do anything from "spot-check a one-line fix" (Haiku) to "audit a refactor for cross-cutting consequences" (Opus). Pick based on the scope of what they're critiquing.
 
 The decision rule: budget tracks deliberation depth, not role label. The role table is a useful default precisely because most lanes match the pattern. When the lane doesn't, deviate.
+
+## Phase B v1.6: Deputy / vice — pause-and-handoff orchestration
+
+*Added Phase B v1.6 — mitigates the master-as-bottleneck failure mode surfaced during Round 9 dogfood.*
+
+Multi-agent orchestration has a structural failure mode: when the master/orchestrator is busy answering the user's questions, drafting external artifacts, or doing deep research, agents stall waiting for outline-greenlights and done-task approvals. Naive scaling makes it worse — more agents in flight means more reviews queued, and the master's review pipeline becomes the critical path.
+
+Per the gap-typology in [`PHASE-B-V2-ROLES-AUDIT.md`](../tasks/khimaira-chat/PHASE-B-V2-ROLES-AUDIT.md) postscript, this is an **application gap** (masters know they could delegate but lack the protocol ergonomics to do it at the right moment) — not a compliance gap or an awareness gap. The matched primitive shape is a just-in-time recommendation: a slash-command pair that makes deputization a one-liner.
+
+### The pattern
+
+The master decides "I'm about to be busy" and runs `/khimaira-deputize <vice-name> [reason]`. This:
+
+1. Signals the user via `PushNotification` + `session_post_notice` to every active session — the master CAN'T spawn Claude Code windows itself; only the user can. The signal includes the suggested vice name (kebab-case) and the reason.
+2. The user opens a fresh Claude Code window and names it via `session_set_name`.
+3. The deputize command (which has been polling `session_list` for the vice-name to register) detects the new session and proceeds.
+4. For each chat the master is in: `chat_transfer_membership(from=master, to=vice)` — atomic master-swap.
+5. The v1.5 role-grant directive fires automatically on the new vice (`🎚️ Role updated: you are now master. /model opus, /effort max.`).
+6. The master's status flips to `paused` (NOT `transferred-out` — the donor stays alive).
+7. A `session_post_notice` lands in the vice's inbox with context: which chats transferred, which tasks are mid-flight, what to prioritize.
+
+The master handles the interruption while the vice drives orchestration. When the master returns, `/khimaira-resume` swaps master role back via the resumption primitive (see spec doc for the convention-only vs new-MCP-primitive trade-off resolved in the round).
+
+### Why this composes from shipped primitives
+
+The deputy pattern doesn't need a new role enum value or a new authority primitive. It composes from:
+
+- **`chat_transfer_membership`** (Phase B v1.2) — atomic master swap on transfer.
+- **`chat_grant_role`** (Phase B v2) — atomic promote-demote for the resume side.
+- **v1.5 role-directive emit** — fires automatically on the role-change events both flows trigger; the vice gets `/model opus, /effort max` without any explicit emit call.
+- **`PushNotification` + `session_post_notice`** — the spawn-request signaling.
+
+The new affordances are (a) the protocol UX (when to deputize, what to include in the spawn request), (b) the spawn-request signaling itself (without which the deputize flow has a chicken-and-egg problem), and possibly (c) a small `chat_resume_original_creator` primitive if convention-only resumption proves insufficient. See the spec doc for the design discussion.
+
+### When to deputize vs alternatives
+
+| Situation | Use |
+|---|---|
+| Master expects to be busy ≥5 min while a round is in flight | `/khimaira-deputize` |
+| Master is shutting down the session entirely; context-window noisy | `/khimaira-transfer-session` (terminal handoff; donor goes `transferred-out`) |
+| Master just needs to delegate a single bounded task | `/khimaira-chat-task` with an assignee |
+| Master needs synchronous help on a research question | `/khimaira-delegate` or `session_log_question` |
+| Master's interruption is brief (<2 min) | Don't deputize — the spawn-and-handoff overhead exceeds the savings |
+
+### Why fresh-spawn-per-handoff
+
+Long-running deputies hit the same context-bloat problem masters do — the deputy's context window fills, and the deputy becomes the bottleneck. Fresh-spawn-per-handoff means each vice session starts clean, optimized for the orchestration work at hand. Cost: short context-warmup time when the vice reads the handoff notice + recent chat history. Benefit: vice carries no baggage from prior sessions.
+
+### What v1.6 explicitly defers
+
+- **Auto-detection of master overload** — a daemon-side heartbeat that fires a notice if the master hasn't logged a chat or decision in N minutes while tasks await review. Useful if v1.6 reveals masters chronically forget to deputize. Deferred to v1.7+ pending evidence.
+- **Multi-chat batch flags** — `/khimaira-deputize --chat <id>` for partial-scope deputization. v1.6 deputizes across all of caller's chats.
+- **Chained deputization** — vice deputizes a vice-vice. Mechanism allows it today (vice IS master in their chats); UX guidance deferred.
+- **Conflict semantics** — original master attempts a second deputize. v1.6 rejects with a hint to `/khimaira-resume` first.
+
+### References
+
+- Spec: [`tasks/khimaira-chat/PHASE-B-V1.6-VICE.md`](../tasks/khimaira-chat/PHASE-B-V1.6-VICE.md)
+- Gap-typology framing: [`PHASE-B-V2-ROLES-AUDIT.md`](../tasks/khimaira-chat/PHASE-B-V2-ROLES-AUDIT.md) Postscript §"Gap typology"
+- The role model this composes on: [The role model](#the-role-model) above
+- The directive emit it triggers: [Role-grant directive](#role-grant-directive) above
+- The terminal-handoff sibling: `khimaira-transfer-session.md` (in dotfiles)
 
 ## References
 
