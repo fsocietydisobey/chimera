@@ -437,3 +437,50 @@ def test_transfer_membership_duplicate_target_returns_409(chats_api_client):
         json={"from_session_id": "bob", "to_session_id": "carol"},
     )
     assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.2: signal-start endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_signal_task_start_returns_200(chats_api_client):
+    """Master posts signal-start on a pending task → 200 + task_signal record."""
+    client, _ = chats_api_client
+    created = client.post(
+        "/api/chats",
+        json={"creator_session_id": "alice", "member_session_ids": ["bob"]},
+    ).json()
+    chat_id = created["meta"]["chat_id"]
+    client.post(f"/api/chats/{chat_id}/accept", json={"session_id": "bob"})
+    task = client.post(
+        f"/api/chats/{chat_id}/tasks",
+        json={"sender_session_id": "alice", "body": "do thing", "assignee_session_id": "bob"},
+    ).json()
+
+    resp = client.post(
+        f"/api/chats/{chat_id}/tasks/{task['id']}/signal-start",
+        json={"by_session_id": "alice", "note": "go ahead"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "task_signal"
+    assert body["signal"] == "start"
+    assert body["task_id"] == task["id"]
+    assert body["note"] == "go ahead"
+
+
+def test_signal_task_start_unknown_task_returns_404(chats_api_client):
+    """Unknown task_id → 404 (project CLAUDE.md unknown-resource coverage)."""
+    client, _ = chats_api_client
+    created = client.post(
+        "/api/chats",
+        json={"creator_session_id": "alice", "member_session_ids": ["bob"]},
+    ).json()
+    chat_id = created["meta"]["chat_id"]
+
+    resp = client.post(
+        f"/api/chats/{chat_id}/tasks/task-doesnotexist/signal-start",
+        json={"by_session_id": "alice"},
+    )
+    assert resp.status_code == 404

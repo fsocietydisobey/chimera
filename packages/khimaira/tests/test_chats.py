@@ -1038,3 +1038,62 @@ def test_transfer_membership_duplicate_target_raises(isolated_chats):
 
     with pytest.raises(ValueError, match="already accepted"):
         c.transfer_membership(chat_id, "bob", "carol")
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.2: master-signal-to-start primitive (task_signal records)
+# ---------------------------------------------------------------------------
+
+
+def test_signal_task_start_records_signal(isolated_chats):
+    """Master signals a pending task; record persists with signal=start."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_two_member_chat(c, sessions_mod)
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    rec = c.signal_task_start(chat_id, task["id"], "alice-uuid", note="cleared to start")
+    assert rec["kind"] == c.TASK_SIGNAL
+    assert rec["signal"] == "start"
+    assert rec["task_id"] == task["id"]
+    assert rec["by_session_id"] == "alice-uuid"
+    assert rec["note"] == "cleared to start"
+    # assignee_id carried on the signal so _route_record can dispatch without re-folding
+    assert rec["assignee_id"] == "bob-uuid"
+
+    # Verify the record landed in the JSONL (round-trip via _read).
+    lines = c._read(chat_id)
+    signal_lines = [ln for ln in lines if ln.get("kind") == c.TASK_SIGNAL]
+    assert len(signal_lines) == 1
+    assert signal_lines[0]["task_id"] == task["id"]
+
+
+def test_signal_task_start_requires_master(isolated_chats):
+    """Non-creator accepted members cannot signal start — master-only gate."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    _make_session(sessions_mod, "carol-uuid", "carol")
+    c.create_room("alice-uuid", ["bob-uuid", "carol-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    c.accept(chat_id, "bob-uuid")
+    c.accept(chat_id, "carol-uuid")
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    # Carol is accepted but isn't the master — must be rejected.
+    with pytest.raises(ValueError, match="not the master"):
+        c.signal_task_start(chat_id, task["id"], "carol-uuid")
+
+
+def test_signal_task_start_rejects_non_pending(isolated_chats):
+    """Signal is only valid on pending tasks; once the assignee picks it up
+    (in_progress), signaling is a no-op semantically and should raise."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_two_member_chat(c, sessions_mod)
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    c.update_task_status(chat_id, task["id"], "bob-uuid", c.TASK_IN_PROGRESS)
+    with pytest.raises(ValueError, match="not 'pending'"):
+        c.signal_task_start(chat_id, task["id"], "alice-uuid")

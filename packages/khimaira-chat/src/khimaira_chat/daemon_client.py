@@ -225,6 +225,31 @@ def update_task_status(
     return resp.json()
 
 
+def signal_task_start(
+    chat_id: str,
+    task_id: str,
+    by_session_id: str,
+    *,
+    note: str | None = None,
+    base: str = DEFAULT_BASE,
+) -> dict[str, Any]:
+    """Master-only "go" signal on a pending task. Doesn't change task status —
+    just emits a task_signal record that surfaces as a channel block for the
+    assignee (or broadcast if unassigned). The assignee still drives the
+    pending → in_progress transition when they pick the task up."""
+    payload: dict[str, Any] = {"by_session_id": by_session_id}
+    if note is not None:
+        payload["note"] = note
+    resp = _request_with_retry(
+        "POST",
+        f"{base}/api/chats/{chat_id}/tasks/{task_id}/signal-start",
+        json=payload,
+        timeout=10.0,
+    )
+    _raise_for_status(resp)
+    return resp.json()
+
+
 def task_status(chat_id: str, session_id: str, *, base: str = DEFAULT_BASE) -> list[dict[str, Any]]:
     """List tasks in a chat with current status. Requester must be an
     accepted member."""

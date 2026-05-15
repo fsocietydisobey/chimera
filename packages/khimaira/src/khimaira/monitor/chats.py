@@ -51,6 +51,7 @@ MEMBER = "member"
 MSG = "msg"
 TASK = "task"
 TASK_UPDATE = "task_update"
+TASK_SIGNAL = "task_signal"
 
 # Task status values.
 TASK_PENDING = "pending"
@@ -574,6 +575,78 @@ def update_task_status(
         by_session_id,
         chat_id,
     )
+    return record
+
+
+def signal_task_start(
+    chat_id: str,
+    task_id: str,
+    by_session_id: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Master-only "go" signal on a pending task.
+
+    Doesn't change task status — the assignee still drives pending → in_progress.
+    Just appends a TASK_SIGNAL record so the assignee sees a channel block
+    indicating they're cleared to start (closes the friction where v1 had no
+    first-class signal beyond free-form chat_send).
+
+    Validates: caller is an accepted member; caller is the chat creator
+    (master); task exists; task is currently in pending status.
+
+    The `signal` field is hardcoded to "start" in v1 — leaves room for future
+    signals (priority bump, deadline warning, abandonment) without renaming.
+    """
+    by_session_id = _resolve_or_uuid(by_session_id)
+    room = load_room(chat_id)
+    member = room["members"].get(by_session_id)
+    if not member or member["state"] != ACCEPTED:
+        state = (member or {}).get("state", "non-member")
+        raise ValueError(
+            f"Session {by_session_id!r} is {state!r} in {chat_id!r}; "
+            f"only accepted members can signal tasks."
+        )
+
+    task_record = None
+    current_status = None
+    for line in _read(chat_id):
+        k = line.get("kind")
+        if k == TASK and line.get("id") == task_id:
+            task_record = line
+            current_status = line.get("status")
+        elif k == TASK_UPDATE and line.get("task_id") == task_id:
+            current_status = line.get("status")
+
+    if task_record is None:
+        raise ValueError(f"No task with id={task_id!r} in {chat_id!r}.")
+
+    if current_status != TASK_PENDING:
+        raise ValueError(
+            f"Task {task_id!r} in {chat_id!r} is {current_status!r}, not 'pending'; "
+            f"signal_start only valid on pending tasks."
+        )
+
+    creator = room["meta"].get("created_by")
+    if by_session_id != creator:
+        raise ValueError(
+            f"Session {by_session_id!r} is not the master (creator={creator!r}) of "
+            f"{chat_id!r}; only the master can signal start on pending tasks."
+        )
+
+    record = {
+        "kind": TASK_SIGNAL,
+        "event_id": _new_event_id(),
+        "ts": _now_iso(),
+        "chat_id": chat_id,
+        "task_id": task_id,
+        "signal": "start",
+        "by_session_id": by_session_id,
+        "by_name": member.get("session_name") or by_session_id[:8],
+        "assignee_id": task_record.get("assignee_id"),
+        "note": note,
+    }
+    _append(chat_id, record)
+    log.info("chats: task %s signal=start by %s in %s", task_id, by_session_id, chat_id)
     return record
 
 

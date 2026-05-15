@@ -280,6 +280,28 @@ def _route_record(record: dict[str, Any], my_session_id: str) -> tuple[str, dict
         }
         return content, meta
 
+    if kind == "task_signal":
+        by_session_id = record.get("by_session_id")
+        if by_session_id == my_session_id:
+            return None  # master sent it; don't echo back to master
+        assignee_id = record.get("assignee_id")
+        if assignee_id is not None and assignee_id != my_session_id:
+            return None  # task has a specific assignee; non-assignees skip
+        # else: I'm the assignee, OR task is unassigned (broadcast).
+        task_id = record.get("task_id", "")
+        by_name = record.get("by_name") or by_session_id or ""
+        note = record.get("note")
+        suffix = f": {note}" if note else ""
+        content = f"🟢 task {task_id} [ready to start] from {by_name}{suffix}"
+        meta = {
+            "chat_id": str(record.get("chat_id", "")),
+            "kind": "task_signal",
+            "task_id": str(task_id),
+            "sender": str(by_name),
+            "signal": str(record.get("signal", "start")),
+        }
+        return content, meta
+
     return None
 
 
@@ -598,6 +620,32 @@ def _build_server() -> Server:
                 },
             ),
             types.Tool(
+                name="chat_task_signal_start",
+                description=(
+                    "Master-only 'go' signal on a pending task. Use when you've "
+                    "created a task and want to explicitly tell the assignee they "
+                    "can start (closes the friction where v1 only had free-form "
+                    "chat_send for this). Doesn't change task status — the assignee "
+                    "still drives pending → in_progress when they pick it up. Valid "
+                    "only on pending tasks; the chat creator (master) is the only "
+                    "role allowed to signal. Surfaces as a `🟢 task ... [ready to "
+                    "start]` channel block on the assignee's side."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "chat_id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "note": {
+                            "type": "string",
+                            "description": "Optional context (e.g. 'all blockers resolved, you can start')",
+                        },
+                    },
+                    "required": ["session_id", "chat_id", "task_id"],
+                },
+            ),
+            types.Tool(
                 name="chat_task_status",
                 description=(
                     "List all tasks in a chat with current status. Returns "
@@ -742,6 +790,10 @@ async def _dispatch_tool(name: str, args: dict[str, Any]) -> Any:
             args["new_status"],
             note=args.get("note"),
         )
+    if name == "chat_task_signal_start":
+        return daemon_client.signal_task_start(
+            args["chat_id"], args["task_id"], sid, note=args.get("note")
+        )
     if name == "chat_task_status":
         return daemon_client.task_status(args["chat_id"], sid)
     if name == "chat_auto_accept_from":
@@ -754,6 +806,39 @@ async def _dispatch_tool(name: str, args: dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 
 
+async def _emit_tools_list_changed() -> None:
+    """Emit notifications/tools/list_changed to Claude Code so it re-fetches
+    the tool list. Forward-compat hook: today our tools are statically
+    registered via @server.list_tools() and never change at runtime, so
+    this isn't called from the codebase yet. But declaring listChanged=True
+    in capabilities means we CAN emit it later (e.g. if daemon-side state
+    ever drives a dynamic tool registry, or if a future Phase exposes
+    runtime-registerable tools). Without the capability declaration,
+    Claude Code wouldn't know to handle the notification when it arrives.
+
+    Note for the original test-agent friction this commit responds to
+    (subprocess running pre-Phase-B code didn't see new chat_task_* tools):
+    that's a SUBPROCESS-STALE-CODE problem, not a runtime-tool-list-change
+    problem. tools/list_changed from the OLD subprocess wouldn't help —
+    it would re-announce its OLD list. The actual fix for that case is
+    subprocess restart (close+reopen Claude Code window). This capability
+    is groundwork for the orthogonal "dynamic tool registry" future.
+    """
+    if _state.write_stream is None:
+        return
+    notif = types.JSONRPCNotification(
+        jsonrpc="2.0",
+        method="notifications/tools/list_changed",
+        params=None,
+    )
+    msg = SessionMessage(message=types.JSONRPCMessage(root=notif))
+    try:
+        await _state.write_stream.send(msg)
+        log.info("khimaira-chat: emitted notifications/tools/list_changed")
+    except Exception as exc:
+        log.warning("khimaira-chat: tools/list_changed emit failed — %s", exc)
+
+
 async def _serve() -> None:
     server = _build_server()
     init_opts = InitializationOptions(
@@ -761,7 +846,14 @@ async def _serve() -> None:
         server_version=SERVER_VERSION,
         capabilities=types.ServerCapabilities(
             experimental={"claude/channel": {}},
-            tools=types.ToolsCapability(listChanged=False),
+            # listChanged=True advertises that we MAY emit
+            # notifications/tools/list_changed at runtime. Today our tools
+            # are statically registered via @server.list_tools() and don't
+            # actually change, but the capability declaration is required
+            # for Claude Code to handle the notification IF we ever do
+            # dynamic registration (Phase B v1.2+ groundwork). See
+            # _emit_tools_list_changed for the helper that fires it.
+            tools=types.ToolsCapability(listChanged=True),
         ),
         instructions=INSTRUCTIONS,
     )

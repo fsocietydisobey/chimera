@@ -60,6 +60,11 @@ class UpdateTaskStatusReq(BaseModel):
     note: str | None = None
 
 
+class SignalTaskStartReq(BaseModel):
+    by_session_id: str
+    note: str | None = None
+
+
 class AutoAcceptReq(BaseModel):
     session_id: str
     allowlist: list[str]
@@ -230,6 +235,21 @@ def build_router():
             # 403 for permission errors (master-only transitions); 404 for unknown task
             msg = str(exc)
             code = 403 if any(w in msg for w in ("creator", "assignee", "transition")) else 404
+            raise fastapi.HTTPException(code, msg) from exc
+
+    @router.post("/chats/{chat_id}/tasks/{task_id}/signal-start")
+    async def signal_task_start(chat_id: str, task_id: str, req: SignalTaskStartReq) -> dict:
+        try:
+            return chats.signal_task_start(chat_id, task_id, req.by_session_id, note=req.note)
+        except ValueError as exc:
+            msg = str(exc)
+            if "No task" in msg:
+                code = 404
+            elif "not 'pending'" in msg:
+                code = 409
+            else:
+                # master-only / non-accepted member → 403
+                code = 403
             raise fastapi.HTTPException(code, msg) from exc
 
     @router.get("/chats/{chat_id}/tasks")

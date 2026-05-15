@@ -207,3 +207,49 @@ def test_my_chats_returns_list(monkeypatch):
     result = daemon_client.my_chats("alice")
     assert len(result) == 2
     assert result[0]["chat_id"] == "chat-aaa"
+
+
+# ---------------------------------------------------------------------------
+# httpx read-timeout pinning — verifies the SSE read-timeout fires when a
+# server accepts the TCP connection but never writes a byte. The original
+# laptop-suspend bug was that subscribe_events used timeout=None and hung
+# silently when the socket died mid-transit. The fix sets read=45.0; this
+# test pins down that httpx actually honors the read parameter under the
+# slow-loris failure mode the production path is meant to detect.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_httpx_read_timeout_fires_on_silent_server():
+    """Slow-loris: server accepts the connection but never writes a byte.
+    httpx.Timeout(read=2.0) should raise httpx.ReadTimeout within ~2-3s
+    when consuming the stream — pinning the behavior subscribe_events
+    depends on for silent-socket-death detection (suspend / NAT timeout)."""
+    import asyncio
+    import time
+
+    async def silent_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Accept the TCP connection, never write headers/body. reader.read()
+        # blocks until httpx closes its side after timeout, then we tidy up.
+        try:
+            await reader.read()
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(silent_handler, "127.0.0.1", 0)
+    host, port = server.sockets[0].getsockname()[:2]
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=2.0, write=10.0, pool=5.0)
+        ) as client:
+            t0 = time.monotonic()
+            with pytest.raises(httpx.ReadTimeout):
+                async with client.stream("GET", f"http://{host}:{port}/") as resp:
+                    async for _ in resp.aiter_lines():
+                        break  # pragma: no cover — never reached
+            elapsed = time.monotonic() - t0
+            # Should fire near the 2.0s mark; allow generous slack for CI load.
+            assert elapsed < 4.0, f"read-timeout took {elapsed:.2f}s; expected <4.0s"
+    finally:
+        server.close()
+        await server.wait_closed()

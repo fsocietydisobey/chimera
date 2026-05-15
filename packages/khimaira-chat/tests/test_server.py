@@ -216,3 +216,82 @@ def test_task_update_without_note_omits_suffix():
 def test_unknown_kind_skipped():
     assert _route_record({"kind": "meta"}, MY_SID) is None
     assert _route_record({}, MY_SID) is None
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.2: task_signal routing
+# ---------------------------------------------------------------------------
+
+
+def test_task_signal_routes_to_assignee():
+    """Master sends signal-start on a task assigned to me → I get a
+    `🟢 ... [ready to start]` channel block."""
+    record = {
+        "kind": "task_signal",
+        "chat_id": "chat-1",
+        "task_id": "task-abc",
+        "signal": "start",
+        "by_session_id": OTHER_SID,
+        "by_name": "master",
+        "assignee_id": MY_SID,
+        "note": "all blockers cleared",
+    }
+    decision = _route_record(record, MY_SID)
+    assert decision is not None
+    content, meta = decision
+    assert content == "🟢 task task-abc [ready to start] from master: all blockers cleared"
+    assert meta == {
+        "chat_id": "chat-1",
+        "kind": "task_signal",
+        "task_id": "task-abc",
+        "sender": "master",
+        "signal": "start",
+    }
+
+
+def test_task_signal_skips_non_assignee():
+    """Task has assignee X; I'm not X → skip. Prevents siblings spam in
+    multi-agent chats where the signal is targeted."""
+    record = {
+        "kind": "task_signal",
+        "chat_id": "chat-1",
+        "task_id": "task-abc",
+        "signal": "start",
+        "by_session_id": OTHER_SID,
+        "by_name": "master",
+        "assignee_id": "session-someone-else",
+    }
+    assert _route_record(record, MY_SID) is None
+
+
+def test_task_signal_broadcasts_when_unassigned():
+    """Unassigned task signal → broadcast (any accepted member could claim
+    it). Mirrors the kind=task unassigned broadcast precedent from v1.1.a."""
+    record = {
+        "kind": "task_signal",
+        "chat_id": "chat-1",
+        "task_id": "task-abc",
+        "signal": "start",
+        "by_session_id": OTHER_SID,
+        "by_name": "master",
+        "assignee_id": None,
+        "note": None,
+    }
+    decision = _route_record(record, MY_SID)
+    assert decision is not None
+    content, _ = decision
+    assert content == "🟢 task task-abc [ready to start] from master"
+
+
+def test_task_signal_skips_own_signal():
+    """Master who sent the signal shouldn't see their own echo."""
+    record = {
+        "kind": "task_signal",
+        "chat_id": "chat-1",
+        "task_id": "task-abc",
+        "signal": "start",
+        "by_session_id": MY_SID,
+        "by_name": "me",
+        "assignee_id": OTHER_SID,
+    }
+    assert _route_record(record, MY_SID) is None
