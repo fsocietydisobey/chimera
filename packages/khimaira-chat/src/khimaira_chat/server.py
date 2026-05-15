@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from typing import Any
 
@@ -36,12 +37,27 @@ SERVER_NAME = "khimaira-chat"
 SERVER_VERSION = "0.1.0"
 
 INSTRUCTIONS = (
-    "Cross-session real-time chat via Claude Code channels. "
-    'Incoming messages arrive as <channel source="khimaira-chat" chat_id="..." '
-    'sender="..."> blocks. Reply with chat_send(chat_id=..., body=...). '
-    "Use chat_accept(chat_id=...) to join an invite. Use chat_my_chats() "
-    "to list active chats. session_id is your own Claude Code session id "
-    "(visible in the SessionStart hook context); pass it to all chat tools."
+    "Cross-session real-time chat via Claude Code channels.\n"
+    "\n"
+    "WHEN TO USE WHICH PRIMITIVE (read this carefully — agents often pick wrong):\n"
+    "- The user says 'reply to <session>', 'send <session> a message', 'chat with "
+    "<session>', or 'tell <session>': call `chat_my_chats(session_id=<my_id>)` FIRST. "
+    "If you have an active chat with that session, use `chat_send(chat_id=..., body=...)`. "
+    "Only fall back to `mcp__khimaira__session_post_notice` if NO shared chat exists.\n"
+    '- Incoming `<channel kind="invite" ...>` block: use `chat_accept` '
+    "(no chat_id arg defaults to the latest pending invite).\n"
+    '- Incoming `<channel sender="..." ...>` block (no kind=invite): that\'s a chat '
+    "message. Reply with `chat_send` to the same chat_id from the channel meta.\n"
+    "- The user wants to leave a note for someone who's not actively chatting: "
+    "use `mcp__khimaira__session_post_notice` (durable, lands in their inbox).\n"
+    "- The user wants a synchronous answer from one peer: use `mcp__khimaira__"
+    "session_log_question` (formal Q→A contract, blocking).\n"
+    "\n"
+    "session_id is your own Claude Code session id (visible in the SessionStart hook "
+    "context block titled '🆔 khimaira session_id'); pass it to all chat_* tools.\n"
+    "\n"
+    "DON'T leak `<thinking>`, `<scratchpad>`, etc. tags into chat message bodies — "
+    "the daemon strips them defensively but it's noise. Send only the message body."
 )
 
 
@@ -75,6 +91,8 @@ class _SubprocessState:
         if self.session_id is None:
             self.session_id = session_id
             log.info("khimaira-chat: registered session_id=%s", session_id)
+            # Bridge Claude Code's `-n <name>` flag → khimaira friendly name.
+            _maybe_register_display_name(session_id)
         elif self.session_id != session_id:
             raise ValueError(
                 f"This subprocess is bound to session {self.session_id!r}; "
@@ -84,6 +102,55 @@ class _SubprocessState:
 
 
 _state = _SubprocessState()
+
+
+def _detect_claude_display_name() -> str | None:
+    """Read parent's argv to find a `-n <name>` / `--name <name>` flag.
+
+    Claude Code's `-n NAME` sets a display name in its own session
+    metadata, but doesn't propagate that name into khimaira's session
+    registry — meaning `claude-chat -n test-agent` makes the session
+    findable via `claude -r test-agent` BUT chat_create_room(members=
+    ["test-agent"]) still 404s because the daemon doesn't know about
+    the name. Bridging that gap manually requires `/rename` after
+    launch, which is friction.
+
+    By reading our parent process's argv (Claude Code is our parent
+    when spawned as a stdio MCP subprocess), we can detect the user's
+    intended name and propagate it to the daemon automatically.
+
+    Linux-only via /proc; returns None on other platforms or if the
+    flag isn't present.
+    """
+    try:
+        ppid = os.getppid()
+        with open(f"/proc/{ppid}/cmdline", "rb") as f:
+            argv = f.read().decode("utf-8", errors="replace").split("\x00")
+        for i, arg in enumerate(argv):
+            if arg in ("-n", "--name") and i + 1 < len(argv):
+                name = argv[i + 1].strip()
+                if name:
+                    return name
+    except (OSError, IndexError, UnicodeDecodeError):
+        pass
+    return None
+
+
+def _maybe_register_display_name(session_id: str) -> None:
+    """If Claude Code launched with `-n <name>`, propagate that to the
+    daemon as a friendly session name. Best-effort: silent on failure
+    (the chat tools still work without the name; user just has to
+    `/rename` manually if they want it)."""
+    name = _detect_claude_display_name()
+    if not name:
+        return
+    try:
+        daemon_client.set_session_name(session_id, name)
+        log.info("khimaira-chat: auto-registered name=%s for session %s", name, session_id)
+    except Exception as exc:
+        # Likely: name already taken, or daemon unreachable. Either way,
+        # don't fail the chat tool call — fallback is /rename.
+        log.warning("khimaira-chat: name auto-register failed for %r — %s", name, exc)
 
 
 # ---------------------------------------------------------------------------

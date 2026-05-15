@@ -341,6 +341,29 @@ def latest_pending_chat_id(session_id: str) -> str | None:
     return pending[0]["chat_id"]
 
 
+_AGENT_TAG_RE = re.compile(
+    r"</?(thinking|scratchpad|reasoning|reflection|inner_monologue)\b[^>]*>",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_message_body(body: str) -> str:
+    """Strip stray XML tags that agents sometimes leak into tool args.
+
+    Observed in the wild: agents accidentally include `</thinking>` and
+    similar internal-monologue tags in chat message bodies (Claude Code
+    prompt-rendering edge case in research-preview channels). Daemon-
+    side strip is defensive — agents that don't leak see no change;
+    those that do get clean message bodies. Whitespace normalized so
+    the strip doesn't leave double-spaces or leading/trailing space.
+    """
+    cleaned = _AGENT_TAG_RE.sub("", body)
+    # Collapse runs of whitespace introduced by the strip; preserve
+    # newlines because chat messages can be multi-line.
+    cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
+    return cleaned
+
+
 def send_message(chat_id: str, sender_session_id: str, body: str) -> dict[str, Any]:
     """Append a message. Sender must be an accepted member; otherwise 403-ish ValueError."""
     sender_session_id = _resolve_or_uuid(sender_session_id)
@@ -360,7 +383,7 @@ def send_message(chat_id: str, sender_session_id: str, body: str) -> dict[str, A
         "chat_id": chat_id,
         "sender_id": sender_session_id,
         "sender_name": member.get("session_name") or sender_session_id[:8],
-        "body": body,
+        "body": _sanitize_message_body(body),
     }
     _append(chat_id, record)
     log.info("chats: msg from %s to %s", sender_session_id, chat_id)

@@ -211,6 +211,21 @@ def delete_chat(chat_id: str, by_session_id: str, *, base: str = DEFAULT_BASE) -
     return resp.json()
 
 
+def set_session_name(session_id: str, name: str, *, base: str = DEFAULT_BASE) -> dict[str, Any]:
+    """Register a friendly name for this session in the daemon's session
+    registry. Used by the chat MCP subprocess to auto-resolve the
+    Claude-Code-side `-n <name>` flag into khimaira's naming, so users
+    don't need to manually `/rename` after launching with `-n`."""
+    resp = _request_with_retry(
+        "POST",
+        f"{base}/api/sessions/{session_id}/name",
+        json={"name": name},
+        timeout=10.0,
+    )
+    _raise_for_status(resp)
+    return resp.json()
+
+
 def get_room(chat_id: str, session_id: str, *, base: str = DEFAULT_BASE) -> dict[str, Any]:
     resp = _request_with_retry(
         "GET", f"{base}/api/chats/{chat_id}", params={"session_id": session_id}, timeout=10.0

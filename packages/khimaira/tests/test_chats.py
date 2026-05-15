@@ -419,6 +419,37 @@ def test_latest_pending_returns_none_when_no_invites(isolated_chats):
     assert c.latest_pending_chat_id("alice") is None
 
 
+def test_sanitize_message_body_strips_thinking_tags(isolated_chats):
+    c = isolated_chats
+    assert (
+        c._sanitize_message_body("hello <thinking>internal</thinking> world")
+        == "hello internal world"
+    )
+    assert c._sanitize_message_body("clean message") == "clean message"
+    assert (
+        c._sanitize_message_body("oops</thinking>") == "oops"
+    )  # opening tag missing — still strip
+    assert c._sanitize_message_body("body <scratchpad>...</scratchpad>") == "body ..."
+    assert c._sanitize_message_body("<reasoning>X</reasoning>actual reply") == "Xactual reply"
+
+
+def test_send_message_strips_thinking_tags(isolated_chats):
+    """End-to-end: a message body with leaked tags lands in JSONL clean."""
+    c = isolated_chats
+    from khimaira.monitor import sessions as sessions_mod
+
+    _make_session(sessions_mod, "alice")
+    _make_session(sessions_mod, "bob")
+
+    room = c.create_room("alice", ["bob"])
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+
+    msg = c.send_message(chat_id, "alice", "Reply: <thinking>x</thinking>actual content")
+    assert "<thinking>" not in msg["body"]
+    assert "actual content" in msg["body"]
+
+
 def test_subscribe_replays_pending_invite_when_late(isolated_chats):
     """Real bug: invitee subscribes AFTER an invite was broadcast. The
     live broadcast missed an empty queue, so the catch-up on subscribe()
@@ -452,9 +483,7 @@ def test_subscribe_replays_pending_invite_when_late(isolated_chats):
 
     received = asyncio.run(run())
     assert any(
-        r.get("kind") == "member"
-        and r.get("state") == "pending"
-        and r.get("session_id") == "bob"
+        r.get("kind") == "member" and r.get("state") == "pending" and r.get("session_id") == "bob"
         for r in received
     )
 
