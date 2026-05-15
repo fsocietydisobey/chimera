@@ -308,6 +308,33 @@ def leave(chat_id: str, session_id: str, *, base: str = DEFAULT_BASE) -> dict[st
     return resp.json()
 
 
+def transfer_membership(
+    chat_id: str,
+    from_session_id: str,
+    to_session_id: str,
+    *,
+    base: str = DEFAULT_BASE,
+) -> dict[str, Any]:
+    """Hand `from`'s chat membership to `to` in one atomic call.
+
+    Used by /khimaira-transfer-session so an outgoing orchestrator session
+    can hand its active chats to a fresh successor without a handshake on
+    the receiving end. The receiving session lands accepted immediately
+    and inherits the full chat_history.
+    """
+    resp = _request_with_retry(
+        "POST",
+        f"{base}/api/chats/{chat_id}/transfer-membership",
+        json={
+            "from_session_id": from_session_id,
+            "to_session_id": to_session_id,
+        },
+        timeout=10.0,
+    )
+    _raise_for_status(resp)
+    return resp.json()
+
+
 def delete_chat(chat_id: str, by_session_id: str, *, base: str = DEFAULT_BASE) -> dict[str, Any]:
     resp = _request_with_retry(
         "DELETE",

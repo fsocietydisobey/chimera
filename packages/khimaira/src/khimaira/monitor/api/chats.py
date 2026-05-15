@@ -69,6 +69,11 @@ class LeaveReq(BaseModel):
     session_id: str
 
 
+class TransferMembershipReq(BaseModel):
+    from_session_id: str
+    to_session_id: str
+
+
 class RejectReq(BaseModel):
     session_id: str
 
@@ -277,6 +282,20 @@ def build_router():
             return chats.leave(chat_id, req.session_id)
         except ValueError as exc:
             raise fastapi.HTTPException(404, str(exc)) from exc
+
+    @router.post("/chats/{chat_id}/transfer-membership")
+    async def transfer_membership(chat_id: str, req: TransferMembershipReq) -> dict:
+        try:
+            return chats.transfer_membership(chat_id, req.from_session_id, req.to_session_id)
+        except ValueError as exc:
+            msg = str(exc)
+            if "already accepted" in msg:
+                code = 409
+            elif "only accepted members" in msg:
+                code = 403
+            else:
+                code = 404
+            raise fastapi.HTTPException(code, msg) from exc
 
     @router.delete("/chats/{chat_id}")
     async def delete_chat(chat_id: str, by_session_id: str) -> dict:

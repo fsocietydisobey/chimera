@@ -476,6 +476,43 @@ def _build_server() -> Server:
                     "required": ["session_id", "chat_id"],
                 },
             ),
+            types.Tool(
+                name="chat_transfer_membership",
+                description=(
+                    "Transfer your chat membership to a different session (for "
+                    "session handoff). The receiving session lands accepted "
+                    "immediately, no handshake. You become transferred-out "
+                    "(no further pushes, no send rights — your chat_history "
+                    "rights persist via the JSONL). Other accepted members "
+                    "see a 📦 system message in the transcript. Pairs with "
+                    "/khimaira-transfer-session — use it for context-handoff "
+                    "to a fresh session, NOT as a generic re-assign primitive."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "Your session id (the donor — also the value of from_session_id)",
+                        },
+                        "chat_id": {"type": "string"},
+                        "from_session_id": {
+                            "type": "string",
+                            "description": "Donor session (must equal session_id; explicit for clarity)",
+                        },
+                        "to_session_id": {
+                            "type": "string",
+                            "description": "Recipient session (must be a known registered session, must not already be an accepted member)",
+                        },
+                    },
+                    "required": [
+                        "session_id",
+                        "chat_id",
+                        "from_session_id",
+                        "to_session_id",
+                    ],
+                },
+            ),
             # ---- Phase B tools ----
             types.Tool(
                 name="chat_send_to",
@@ -676,6 +713,20 @@ async def _dispatch_tool(name: str, args: dict[str, Any]) -> Any:
         return daemon_client.leave(args["chat_id"], sid)
     if name == "chat_delete":
         return daemon_client.delete_chat(args["chat_id"], sid)
+    if name == "chat_transfer_membership":
+        # `from_session_id` must equal `sid` — the subprocess identity
+        # is the source of truth; the explicit `from_session_id` arg
+        # exists for readability at the call site. Reject mismatch
+        # loudly rather than silently overriding.
+        from_sid = args["from_session_id"]
+        if from_sid != sid:
+            return {
+                "error": (
+                    f"from_session_id ({from_sid!r}) must equal this subprocess's "
+                    f"session ({sid!r}). You can only transfer your own membership."
+                )
+            }
+        return daemon_client.transfer_membership(args["chat_id"], sid, args["to_session_id"])
     # ---- Phase B ----
     if name == "chat_send_to":
         return daemon_client.send_message(args["chat_id"], sid, args["body"], to=args["to"])

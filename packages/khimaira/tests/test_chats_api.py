@@ -345,3 +345,95 @@ def test_invite_by_pending_member_rejected(chats_api_client):
         json={"by_session_id": "bob", "invitee_session_id": "carol"},
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.2: transfer_membership endpoint
+# ---------------------------------------------------------------------------
+
+
+def _plant_session(name: str) -> None:
+    """Helper — write a state dir for sessions not in the fixture's defaults."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    sd = sessions_mod._session_dir(name)
+    (sd / "status.json").write_text(
+        json.dumps({"status": "implementing", "name": name}), encoding="utf-8"
+    )
+
+
+def test_transfer_membership_happy_path_returns_200(chats_api_client):
+    client, _ = chats_api_client
+    _plant_session("dave")
+    created = client.post(
+        "/api/chats",
+        json={"creator_session_id": "alice", "member_session_ids": ["bob"]},
+    ).json()
+    chat_id = created["meta"]["chat_id"]
+    client.post(f"/api/chats/{chat_id}/accept", json={"session_id": "bob"})
+
+    resp = client.post(
+        f"/api/chats/{chat_id}/transfer-membership",
+        json={"from_session_id": "bob", "to_session_id": "dave"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["transfer_id"].startswith("xfer-")
+    assert body["from"]["state"] == "transferred-out"
+    assert body["to"]["state"] == "accepted"
+
+
+def test_transfer_membership_unknown_target_returns_404(chats_api_client):
+    """Required by project CLAUDE.md: every session-resolving endpoint
+    needs unknown-name coverage. Resolving 'ghost' raises ValueError →
+    handler must map to 404, not let it become a 500."""
+    client, _ = chats_api_client
+    created = client.post(
+        "/api/chats",
+        json={"creator_session_id": "alice", "member_session_ids": ["bob"]},
+    ).json()
+    chat_id = created["meta"]["chat_id"]
+    client.post(f"/api/chats/{chat_id}/accept", json={"session_id": "bob"})
+
+    resp = client.post(
+        f"/api/chats/{chat_id}/transfer-membership",
+        json={"from_session_id": "bob", "to_session_id": "ghost"},
+    )
+    assert resp.status_code == 404
+
+
+def test_transfer_membership_pending_source_returns_403(chats_api_client):
+    """A pending session has nothing to transfer — 403 (forbidden), not 404."""
+    client, _ = chats_api_client
+    _plant_session("dave")
+    created = client.post(
+        "/api/chats",
+        json={"creator_session_id": "alice", "member_session_ids": ["bob"]},
+    ).json()
+    chat_id = created["meta"]["chat_id"]
+    # bob is still pending — has not accepted
+
+    resp = client.post(
+        f"/api/chats/{chat_id}/transfer-membership",
+        json={"from_session_id": "bob", "to_session_id": "dave"},
+    )
+    assert resp.status_code == 403
+
+
+def test_transfer_membership_duplicate_target_returns_409(chats_api_client):
+    """Recipient is already an accepted member → 409 conflict, not silent
+    state overwrite."""
+    client, _ = chats_api_client
+    created = client.post(
+        "/api/chats",
+        json={"creator_session_id": "alice", "member_session_ids": ["bob", "carol"]},
+    ).json()
+    chat_id = created["meta"]["chat_id"]
+    client.post(f"/api/chats/{chat_id}/accept", json={"session_id": "bob"})
+    client.post(f"/api/chats/{chat_id}/accept", json={"session_id": "carol"})
+
+    resp = client.post(
+        f"/api/chats/{chat_id}/transfer-membership",
+        json={"from_session_id": "bob", "to_session_id": "carol"},
+    )
+    assert resp.status_code == 409

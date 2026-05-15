@@ -924,3 +924,117 @@ def test_apply_auto_accept_by_name_returns_applied_true_when_file_exists(isolate
     # And: a fresh call with NO file present returns applied=False.
     result_missing = c.apply_auto_accept_by_name("alice-uuid-v3", "no-such-name")
     assert result_missing == {"applied": False, "allow": []}
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.2: transfer_membership
+# ---------------------------------------------------------------------------
+
+
+def test_transfer_membership_round_trip_happy_path(isolated_chats):
+    """Bob transfers his chat membership to Dave; Carol (the other accepted
+    member) sees the system message in her chat_history. Confirms the
+    state transitions on both sides, the shared transfer_id correlation,
+    and the load-bearing `invited_by` field that lets chat_my_chats
+    surface the inherited chat for Dave without special-casing."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "carol", "carol")
+    _make_session(sessions_mod, "dave", "dave")
+
+    room = c.create_room("alice", ["bob", "carol"], title="ops")
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+    c.accept(chat_id, "carol")
+
+    result = c.transfer_membership(chat_id, "bob", "dave")
+    assert result["transfer_id"].startswith("xfer-")
+    assert result["from"]["state"] == c.TRANSFERRED_OUT
+    assert result["from"]["transferred_to"] == "dave"
+    assert result["to"]["state"] == c.ACCEPTED
+    assert result["to"]["transferred_from"] == "bob"
+    assert result["from"]["transfer_id"] == result["to"]["transfer_id"]
+    # invited_by on the new member is bob — chat_my_chats can surface the
+    # inherited chat for dave without a special handler for transfers.
+    assert result["to"]["invited_by"] == "bob"
+
+    room = c.load_room(chat_id)
+    assert room["members"]["bob"]["state"] == c.TRANSFERRED_OUT
+    assert room["members"]["dave"]["state"] == c.ACCEPTED
+    # Carol — the third party — sees the system message in chat_history.
+    history = c.history(chat_id, "carol")
+    transfer_msg = [m for m in history if m.get("sender_id") == c.SYSTEM_SENDER_ID]
+    assert len(transfer_msg) == 1
+    assert "transferred this chat" in transfer_msg[0]["body"]
+    assert transfer_msg[0]["meta"]["event_type"] == "transfer"
+    assert transfer_msg[0]["meta"]["transfer_id"] == result["transfer_id"]
+
+
+def test_transfer_membership_requires_accepted_source(isolated_chats):
+    """A pending member can't transfer — they have nothing to hand off."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "dave", "dave")
+
+    room = c.create_room("alice", ["bob"])
+    chat_id = room["meta"]["chat_id"]
+    # bob is still PENDING — hasn't accepted yet.
+
+    with pytest.raises(ValueError, match="only accepted members"):
+        c.transfer_membership(chat_id, "bob", "dave")
+
+
+def test_transfer_membership_readable_to_recipient_immediately(isolated_chats):
+    """Dave can call chat_history right after transfer and see the FULL
+    transcript (alice's earlier message + the system transfer message),
+    not just messages from his accepted-at timestamp forward. The
+    transferred-in state must grant the same history-read rights as a
+    normally-accepted member."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "dave", "dave")
+
+    room = c.create_room("alice", ["bob"])
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+    c.send_message(chat_id, "alice", "early message from alice")
+    c.send_message(chat_id, "bob", "early reply from bob")
+
+    c.transfer_membership(chat_id, "bob", "dave")
+
+    # Dave reads history — should see the two pre-transfer messages plus
+    # the system transfer message.
+    history = c.history(chat_id, "dave")
+    bodies = [m["body"] for m in history]
+    assert "early message from alice" in bodies
+    assert "early reply from bob" in bodies
+    assert any("transferred this chat" in b for b in bodies)
+
+
+def test_transfer_membership_duplicate_target_raises(isolated_chats):
+    """If the receiving session is already an accepted member, transfer
+    must raise (409 case at the HTTP layer) — silently demoting an
+    existing member would lose state."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice", "alice")
+    _make_session(sessions_mod, "bob", "bob")
+    _make_session(sessions_mod, "carol", "carol")
+
+    room = c.create_room("alice", ["bob", "carol"])
+    chat_id = room["meta"]["chat_id"]
+    c.accept(chat_id, "bob")
+    c.accept(chat_id, "carol")
+
+    with pytest.raises(ValueError, match="already accepted"):
+        c.transfer_membership(chat_id, "bob", "carol")

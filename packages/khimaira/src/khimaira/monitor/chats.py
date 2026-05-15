@@ -38,6 +38,12 @@ ACCEPTED = "accepted"
 REJECTED = "rejected"  # invitee declined; can be re-invited later
 LEFT = "left"
 REMOVED = "removed"
+TRANSFERRED_OUT = "transferred-out"  # session handed membership to another via transfer_membership
+
+# Sender id used for daemon-synthesized system messages (e.g. the
+# transfer_membership broadcast). Stable constant so future audit /
+# filter code can match without sniffing body text.
+SYSTEM_SENDER_ID = "khimaira-system"
 
 # Line kinds in the JSONL.
 META = "meta"
@@ -766,6 +772,112 @@ def leave(chat_id: str, session_id: str) -> dict[str, Any]:
     _append(chat_id, record)
     log.info("chats: %s left %s", session_id, chat_id)
     return record
+
+
+def transfer_membership(
+    chat_id: str,
+    from_session_id: str,
+    to_session_id: str,
+) -> dict[str, Any]:
+    """Hand `from`'s chat membership to `to`, preserving full history.
+
+    Used by /khimaira-transfer-session so an orchestrator session can hand
+    off ALL its active chats to a fresh successor session in one shot. The
+    receiving session lands ACCEPTED immediately (no handshake); the donor
+    becomes TRANSFERRED_OUT (no future pushes, no send rights). Other
+    accepted members see a synthetic system message in the chat so the
+    handoff is visible in transcript and post-hoc audit.
+
+    State transitions are passive: the `state != ACCEPTED` gate in
+    `_broadcast` and `send_message` handles cutoff — no special teardown.
+    A previously-transferred-out session can be re-invited, accept, and
+    transfer out again — each transfer is independent.
+
+    Raises:
+        ValueError: if `from` is not currently ACCEPTED in this chat (403),
+            if `to` resolves to no known session (404), or if `to` is
+            already ACCEPTED in this chat (409 — would be a no-op clash).
+    """
+    from_session_id = _resolve_or_uuid(from_session_id)
+    to_session_id = _resolve_or_uuid(to_session_id)
+    room = load_room(chat_id)
+
+    from_member = room["members"].get(from_session_id)
+    if not from_member or from_member["state"] != ACCEPTED:
+        state = (from_member or {}).get("state", "non-member")
+        raise ValueError(
+            f"Session {from_session_id!r} is {state!r} in {chat_id!r}; "
+            f"only accepted members can transfer their membership."
+        )
+
+    to_member = room["members"].get(to_session_id)
+    if to_member and to_member["state"] == ACCEPTED:
+        raise ValueError(
+            f"Session {to_session_id!r} is already accepted in {chat_id!r}; "
+            f"transfer target must not already be a member."
+        )
+
+    transfer_id = "xfer-" + uuid.uuid4().hex[:12]
+    from_name = from_member.get("session_name") or from_session_id[:8]
+    to_name = _resolve_session_name(to_session_id) or to_session_id[:8]
+    ts = _now_iso()
+
+    out_record = {
+        "kind": MEMBER,
+        "event_id": _new_event_id(),
+        "ts": ts,
+        "chat_id": chat_id,
+        "session_id": from_session_id,
+        "session_name": from_name,
+        "state": TRANSFERRED_OUT,
+        "transferred_to": to_session_id,
+        "transfer_id": transfer_id,
+    }
+    in_record = {
+        "kind": MEMBER,
+        "event_id": _new_event_id(),
+        "ts": ts,
+        "chat_id": chat_id,
+        "session_id": to_session_id,
+        "session_name": to_name,
+        "state": ACCEPTED,
+        "invited_by": from_session_id,
+        "transferred_from": from_session_id,
+        "transfer_id": transfer_id,
+    }
+    sys_msg = {
+        "kind": MSG,
+        "event_id": _new_event_id(),
+        "id": "msg-" + uuid.uuid4().hex[:12],
+        "ts": ts,
+        "chat_id": chat_id,
+        "sender_id": SYSTEM_SENDER_ID,
+        "sender_name": SYSTEM_SENDER_ID,
+        "body": f"📦 {from_name} transferred this chat to {to_name} — full context handoff",
+        "to": None,
+        "meta": {
+            "event_type": "transfer",
+            "transfer_id": transfer_id,
+            "from": from_session_id,
+            "to": to_session_id,
+        },
+    }
+    _append(chat_id, out_record)
+    _append(chat_id, in_record)
+    _append(chat_id, sys_msg)
+    log.info(
+        "chats: transfer chat=%s from=%s to=%s transfer_id=%s",
+        chat_id,
+        from_session_id,
+        to_session_id,
+        transfer_id,
+    )
+    return {
+        "chat_id": chat_id,
+        "transfer_id": transfer_id,
+        "from": out_record,
+        "to": in_record,
+    }
 
 
 def delete(chat_id: str, by_session_id: str) -> dict[str, Any]:
