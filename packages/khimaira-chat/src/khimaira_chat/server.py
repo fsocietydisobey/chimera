@@ -51,7 +51,20 @@ INSTRUCTIONS = (
 
 
 class _SubprocessState:
-    """Holds the session_id (lazy-registered) + SSE subscriber task."""
+    """Holds the session_id (lazy-registered) + SSE subscriber task.
+
+    **One subprocess = one session, for its lifetime.** This is load-bearing:
+    Claude Code's channel-notification routing is per-stdio-pipe (the
+    notification only reaches the agent that spawned this subprocess).
+    Sharing a subprocess across sessions would break that routing — the
+    daemon would push events for session B's chats to a subprocess that
+    actually serves session A, and the agent never sees them.
+
+    `register()` enforces this by raising if a tool call arrives bearing a
+    different session_id after the first one is bound. The raise is
+    visible in the agent's tool-call result, so a misconfigured caller
+    fails loudly rather than silently rewriting our identity.
+    """
 
     def __init__(self) -> None:
         self.session_id: str | None = None

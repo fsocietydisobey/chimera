@@ -437,6 +437,16 @@ async def subscribe(session_id: str, since_event_id: str | None = None) -> Any:
     _subscribers.setdefault(session_id, set()).add(queue)
     try:
         if since_event_id:
+            # v1.1 follow-up: when since_event_id is unrecognized in any
+            # chat (cursor older than chat history, archived chat,
+            # cross-chat id confusion), we silently skip backfill for
+            # that chat. The JSONL is append-only so this *shouldn't*
+            # happen in practice, but the silent gap risks "phantom
+            # missing messages" with no signal. Add a sentinel record
+            # like {"kind": "backfill_gap", "chat_id": ...} so the
+            # subprocess can render "events older than your cursor were
+            # not found in this chat — call chat_history for full
+            # transcript" instead of just delivering nothing.
             for chat_meta in my_chats(session_id):
                 chat_id = chat_meta["chat_id"]
                 lines = _read(chat_id)
