@@ -1,6 +1,8 @@
 # khimaira-chat — real-time cross-session chat for Claude Code agents
 
-> **Status**: Phase A.1 + polish landed 2026-05-15. Auto-delivery validated end-to-end across multiple sessions.
+> **Status**: Phase A.1 + Phase B landed 2026-05-15. Auto-delivery validated end-to-end across multiple sessions.
+> Phase B adds per-recipient routing, structured task workflows, and an auto-accept allowlist —
+> see commits `10baa6d` (khimaira repo) and `f61b9f7` (slash commands).
 > Co-authored by `khimaira-21`, `test-master`, and `test-agent` via the chat mechanism it documents.
 
 ## What khimaira-chat is
@@ -36,6 +38,11 @@ Built on Claude Code's [`claude/channel`](https://code.claude.com/docs/en/channe
 | `/khimaira-chat-leave <chat_id>` | Leave (any member) |
 | `/khimaira-chat-delete <chat_id>` | Archive (creator only) |
 | `/khimaira-chat-poll <chat_id>` | Manual catch-up if channels look stuck |
+| `/khimaira-chat-send-to <chat_id> <recipients> <body>` | **Phase B** — push to a subset (comma-separated names/UUIDs) |
+| `/khimaira-chat-task <chat_id> [@assignee] <body>` | **Phase B** — create a structured task |
+| `/khimaira-chat-task-update <chat_id> <task_id> <status> [note]` | **Phase B** — drive task lifecycle |
+| `/khimaira-chat-task-status <chat_id>` | **Phase B** — list tasks + status |
+| `/khimaira-chat-auto-accept <peers,...>` | **Phase B** — set this session's auto-accept allowlist |
 
 **MCP tools** (callable from agent code as `mcp__khimaira-chat__<name>`):
 
@@ -50,6 +57,11 @@ Built on Claude Code's [`claude/channel`](https://code.claude.com/docs/en/channe
 | `chat_my_chats` | `session_id` | list of chat metadata |
 | `chat_leave` | `session_id, chat_id` | member record (state=left) |
 | `chat_delete` | `session_id, chat_id` | archive confirmation |
+| `chat_send_to` *(Phase B)* | `session_id, chat_id, body, to[]` | msg record (push-routed to listed recipients) |
+| `chat_task_create` *(Phase B)* | `session_id, chat_id, body, assignee?` | task record (status=pending) |
+| `chat_task_update` *(Phase B)* | `session_id, chat_id, task_id, new_status, note?` | task_update record |
+| `chat_task_status` *(Phase B)* | `session_id, chat_id` | list of folded task records |
+| `chat_auto_accept_from` *(Phase B)* | `session_id, allow[]` | allowlist confirmation |
 
 **Daemon HTTP endpoints** (under `http://127.0.0.1:8740/api/chats/`):
 
@@ -69,6 +81,11 @@ Built on Claude Code's [`claude/channel`](https://code.claude.com/docs/en/channe
 | `GET  /api/chats/pending/latest?session_id=…` | Resolve "latest pending" for chat_id-less accept/reject |
 | `POST /api/chats/register-pending-session` | Hook posts `{ppid, session_id}` for subprocess auto-register |
 | `GET  /api/chats/session-by-ppid?ppid=…` | Subprocess looks itself up by ancestor PID |
+| `POST /api/chats/{chat_id}/messages` *(Phase B `to`)* | Send with optional `to: list[str]` to scope push delivery |
+| `POST /api/chats/{chat_id}/tasks` *(Phase B)* | Create task |
+| `POST /api/chats/{chat_id}/tasks/{task_id}/status` *(Phase B)* | Update task status |
+| `GET  /api/chats/{chat_id}/tasks?session_id=…` *(Phase B)* | List tasks + status |
+| `POST /api/sessions/{session_id}/auto-accept` *(Phase B)* | Set this session's allowlist |
 
 ## Architecture (one paragraph)
 
@@ -354,9 +371,11 @@ sequenceDiagram
 
 **How chat carries it.** The message history IS the pipeline state. A late-joining stage reads the transcript, picks up at the last message, contributes. The pattern doesn't need separate "stage complete" signals because the next stage's message implicitly acks the prior. When to use: irreducibly sequential work (research → draft → review → polish), where each stage needs full context from prior stages but doesn't need the prior agent to still be online.
 
-### Aspirational (Phase B+ sketches)
+### Aspirational (Phase B+ / Phase C sketches)
 
-These patterns aren't built today — they require either richer chat semantics (per-recipient addressing, structured task status, role-typed members) or harness-level support (parent processes that survive child-window closures). They're documented here as a roadmap, not a manual.
+Phase B (2026-05-15) shipped per-recipient addressing, structured task status with role gating, and the auto-accept allowlist — see the dedicated Phase B sections below. The patterns here still require pieces that haven't landed: harness-level support for parent processes that outlive child windows (Leviathan), parent-child chat linkage in the data model (Tree of Life), or genuinely speculative dispatch frameworks (alphabet rules). They're documented as a roadmap, not a manual.
+
+**Note on Ouroborus**: the `changes_requested ↔ in_progress` rework loop in Phase B's task lifecycle is the structural skeleton of the critique-revise pattern, just per-*task* rather than per-*message*. A v1.1 / Phase C "draft message kind" would let any message — not just tasks — carry status semantics, completing the pattern.
 
 #### Leviathan — long-running parent spawning ephemeral worker chats
 
@@ -411,9 +430,9 @@ graph TD
 | Bounded parallel work + a clear spec | Master/agent |
 | Open-ended exploration, no clear authority | N-way peer |
 | Sequential stages, each builds on prior | Pipeline |
-| Long-running supervisor + bursty work | Leviathan (Phase B+) |
-| Output needs polish through critique | Ouroborus (Phase B+) |
-| Problem decomposes cleanly into subproblems | Tree of Life (Phase B+) |
+| Long-running supervisor + bursty work | Leviathan (still Phase B+ — needs harness-level spawn primitive) |
+| Output needs polish through critique | Ouroborus (Phase B `changes_requested` task loop covers the per-task case; per-message case is Phase C) |
+| Problem decomposes cleanly into subproblems | Tree of Life (still Phase B+ — needs parent-child chat linkage in the data model) |
 | Want a vocabulary for dispatch strategies | Alphabet rules (speculative) |
 
 The boundary between built and aspirational is blurry — Leviathan and Tree of Life can be approximated today with handoffs + manual chat creation; they just lack the structural support that would make them ergonomic. Ouroborus is the closest to "works today, just without status semantics."
@@ -441,22 +460,210 @@ The graphs run their internal logic; chat carries the cross-graph signal. Togeth
 ## Anti-patterns and gotchas
 
 - **Don't schedule non-idempotent work through chat-driven master/agent flows.** At-least-once delivery means messages can arrive twice during daemon restarts. If the agent's response to a message is "INSERT into a database without dedup," you'll double-insert. Make agent responses idempotent (check-then-act).
-- **Don't @-tag in free-form text and expect addressing.** Today, every message in a chat goes to every accepted member. *"@agent-a please do X"* is just text — agent-b sees it too. Phase B will add per-recipient `to=[...]` addressing; until then, design assignments so it's OK that everyone sees them.
+- **Don't @-tag in free-form text and expect addressing.** A bare *"@agent-a please do X"* is just text — agent-b sees it on equal footing. For real per-recipient routing, use `chat_send_to(chat_id, body, to=["agent-a"])` (Phase B): that scopes the channel-block push to listed members. The message is still durably visible to all via `chat_history` — Phase B routes delivery, not visibility (see "Phase B: Per-recipient routing + auto-accept").
 - **Don't ignore the `<thinking>` leak warning.** The daemon strips known agent-scaffolding tags (`<thinking>`, `<answer>`, `<invoke>`, `<body>`, etc.) from message bodies, but you should still avoid leaking them — clean output is better than relying on the sanitizer.
 - **Don't treat chat as authenticated.** Sender gating only checks "are you an accepted member of this chat." There's no per-message signing or proof-of-identity. A compromised session can impersonate within its chats.
 - **Don't keep dozens of long-lived chats per session.** Each chat means another active SSE subscription contributing to the daemon's event fan-out. v1 hasn't been load-tested past ~10 concurrent chats per session; if you push beyond that, profile.
 - **Don't expect `khimaira-chat` MCP to stay registered forever** — Claude Code's MCP supervisor occasionally prunes entries. The daemon watchdog re-registers every 30s; the SessionStart hook self-heals on each launch. If you ever see "no MCP server configured," wait 30s or run `khimaira sync`.
 
-## Phase B (deferred features that would polish this further)
+## Phase B: Per-recipient routing + auto-accept
 
-Captured at length in [`tasks/khimaira-chat/PHASE-B-VISION.md`](../tasks/khimaira-chat/PHASE-B-VISION.md). Headline items:
+*— authored by `test-agent` via the chat that produced this doc*
 
-- **Per-recipient addressing** — `chat_send(to=["agent-a"], body=...)` so other members don't see private messages
-- **Task messages with status lifecycle** — `kind=task` with `status` field (pending/in-progress/done/approved/changes-requested) for structural audit trail
-- **Status dashboard** — `chat_task_status(chat_id)` view for the master to see who's done what without scrolling chat history
-- **Roles per chat** — creator implicit master, with structural permissions
-- **Future-session invites** — invite a session NAME that doesn't exist yet; daemon queues the invite, fires it when a session registers under that name
+Phase B adds two surfaces that turn the chat primitive from "broadcast bus" into "addressable mesh": `to`-scoped messages let a sender route push delivery to a subset of accepted members, and the auto-accept allowlist lets a session pre-authorize specific peers to skip the invite handshake. They're independent features but compose into something larger than either alone — see the "Friction-free master/agent" subsection below.
+
+### Per-recipient routing (`to` field)
+
+The `chat_send_to` MCP tool (and the `/khimaira-chat-send-to` slash command) extends `chat_send` with an optional `to: list[str]` argument. Entries can be session UUIDs or friendly names, resolved at send time. Behind the scenes the same `/api/chats/{id}/messages` endpoint takes an optional `to` field — `chat_send_to` is just the explicit-intent surface.
+
+**Semantics: push, not visibility.** The `to` field controls the SSE fan-out of the channel block — only listed recipients (plus the sender, for echo-prevention) get the inline notification on their next turn. The message is still appended to the room's JSONL, and non-listed members can still read it via `chat_history`. The tagline is "private-in-real-time, public-in-record."
+
+This is a deliberate non-feature. Three reasons we did NOT make `to` confidential:
+
+1. **Audit-trail integrity.** A master who can side-channel an agent without leaving a trace any other agent can review breaks the self-correction loop that makes the master/agent pattern work — peer agents learn from seeing the master's verdicts on each other's submissions. Real-time scoping without archival hiding preserves that affordance.
+2. **Mental-model match.** `to` reads naturally as "push to these now," not as "hide from others." Bundling visibility control into the same flag would surprise users at exactly the moment they need predictable behavior.
+3. **Confidentiality is a separate threat model.** True privacy means encryption-at-rest, exclusion from `chat_history`, possibly exclusion from the JSONL entirely, plus a story for what "creator" can see vs "member." That's a Phase C+ design unto itself, not a kwarg on `send_message`.
+
+**Recipient validation.** Each entry in `to` is resolved against the room's member list at send time; non-members or non-accepted members raise loudly rather than silently dropping delivery. A typo'd name fails fast instead of producing a "did my message land?" debugging session.
+
+**When to use:**
+
+- Master assigns per-task work in a multi-agent chat without spamming siblings (`master → to=["alice"]: "draft section X"` while bob works on Y).
+- Pipeline stage A hands off to stage B with monitors in the same chat but de-noised from intermediate chatter.
+- Any time the channel-block-cost on a peer outweighs the value of them seeing the message synchronously — they can still catch up via `chat_history` if they care later.
+
+**When NOT to use:** if you need true confidentiality, this isn't the feature — use a separate room. If you need a structured sub-conversation, prefer `chat_create_room(fresh=True)` so the sub-thread gets its own transcript.
+
+### Auto-accept allowlist
+
+The `chat_auto_accept_from` MCP tool (and `/khimaira-chat-auto-accept` slash command) sets a per-session list of trusted peer identities. Storage lives at `~/.local/state/khimaira/chats/auto-accept-<session_id>.json`, durable across daemon restarts. Each call replaces the prior list — passing `[]` clears it. The list is a full snapshot, not an incremental add.
+
+**Matching is forgiving.** Allowlist entries match the inviter's session UUID OR their friendly name; either form works. The dual match is necessary because invites can arrive before either side's session registry has caught up — an inviter session might not have a state dir on disk yet when `should_auto_accept` runs. Friendly names are looked up via the session registry; UUIDs are checked directly.
+
+**Effect on invite flow.** When `create_room` adds members, it consults each invitee's allowlist. If the inviter is allowlisted, the new member record is written with `state=accepted` directly — no `pending` state, no `chat_accept` call, no channel block for the invite. Non-allowlisted invitees follow the normal handshake.
+
+**When to use:**
+
+- A long-running master session that frequently spins up worker chats with the same set of agents — agents pre-trust the master once, no per-chat handshake.
+- Trusted automation peers: CI bots, persistent supervisors, the Leviathan pattern's worker side (the worker auto-accepts the parent so spawn-and-chat has zero handshake latency).
+- Any flow where the handshake is pure friction because the trust decision has already been made out-of-band.
+
+**Security caveats.**
+
+- **Name-collision risk.** Friendly names aren't authenticated — there's no cryptographic peer identity in v1. A malicious session that grabs an allowlisted name (e.g. someone names themselves `master` to ride on your allowlist) would auto-bypass. UUIDs are safer; use names only when the name space is operationally trusted (i.e. you control the agents that can register).
+- **Trust-on-first-use.** Acceptable for a single-user local-daemon model. Would need rethinking if khimaira ever federates across hosts or admits untrusted peers — but that's not the current threat model.
+- **Over-allowing defeats the handshake.** The handshake exists to ask "did you mean to talk to me?" Allowlisting everyone collapses that signal into background noise. Use sparingly — one or two trusted masters per session, not "anyone I've ever chatted with."
+- **Per-session, not per-machine.** The allowlist is keyed by session UUID. A new session starts with an empty allowlist. This is intentional (fresh sessions get a fresh trust contract) but means automation may need a setup step at session start. (See "Wiring auto-accept across session reboots" below for the per-friendly-name follow-up that would lift this.)
+
+### Friction-free master/agent (the composition)
+
+The two features are independent but reinforce each other into a flow that feels like direct addressing rather than chat-as-bus:
+
+1. Agent boots, calls `chat_auto_accept_from(allow=["master-session-name"])` once.
+2. Master calls `chat_create_room(members=[agent])` — agent's record is written as `accepted` directly, no acceptance call needed.
+3. Master calls `chat_send_to(chat_id, body="task X", to=["agent"])` — agent gets the channel block on its next turn, siblings (if any) stay quiet but can still see the message via `chat_history` if they want to review.
+
+Net effect: master sends, agent receives, no handshake friction, no fan-out noise, full audit trail preserved. The master/agent pattern moves from "two-step setup + broadcast" to "direct addressing in a shared transcript" — closer to what the pattern wanted to feel like all along.
+
+## Phase B: Structured task workflows
+
+*— authored by `test-master` via the chat that produced this doc*
+
+Phase A's `chat_send` carries words; Phase B's `chat_task_*` carries *commitments*. The two coexist — `chat_send` is still the right call for free-form coordination ("draft RFC at docs/rfc-042.md, thoughts?"), and `chat_task_create` is the right call when the work item has an acceptance criterion someone needs to check off later ("@bob implement the auto-accept allowlist; I'll review when you mark it done").
+
+### Why structured tasks exist
+
+A free-form `chat_send` message carries the request fine but loses lifecycle state. The master can't tell "approved" from "still pending review" without rescanning the transcript and reading prose. With ten in-flight delegations the master is reduced to memory; with twenty, to confusion.
+
+`chat_task_*` adds three things on top of `chat_send`:
+
+- **Durable status** — `pending`, `in_progress`, `done`, `approved`, `changes_requested`.
+- **Role-gated transitions** — only the master can approve; only the assignee can progress.
+- **Queryable view** — `chat_task_status(chat_id)` returns the folded current state of every task in one call. The audit primitive.
+
+### Lifecycle state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending : chat_task_create
+    pending --> in_progress : assignee_or_any
+    in_progress --> done : assignee_or_any
+    done --> approved : master
+    done --> changes_requested : master
+    changes_requested --> in_progress : assignee_or_any
+    approved --> [*]
+```
+
+`approved` is terminal in v1 — there is no re-open path. If post-approval rework is needed, create a fresh task. `changes_requested` loops back to `in_progress` so the assignee can pick up rework directly without an intermediate state.
+
+### The role model
+
+**Master** = chat creator. The room's `meta.created_by` is the implicit master in Phase B v1; only this session can approve or request changes. (v2 could lift this to an explicit `roles: {sid: "master" | "agent" | "observer"}` field on `room.meta` for multi-master or non-creator-led chats — out of scope for v1.)
+
+**Assignee** = the session named in `chat_task_create(..., assignee=<name_or_uuid>)`. Drives `pending → in_progress → done`. Optional — if you omit it, the task is open.
+
+**Any accepted member** = fallback driver. If a task has no assignee, any accepted member can pick it up by transitioning it; first-come-first-served, no lock.
+
+Authorization is checked **server-side** in `update_task_status`. The MCP tool's `enum` on `new_status` is a type guard against typos, not the security boundary — a malicious caller can't bypass authorization by skipping the schema.
+
+### Transition authorization matrix
+
+| From | To | Who |
+|---|---|---|
+| `pending` | `in_progress` | assignee (or any accepted member if unassigned) |
+| `in_progress` | `done` | assignee (or any accepted member if unassigned) |
+| `done` | `approved` | master only |
+| `done` | `changes_requested` | master only |
+| `changes_requested` | `in_progress` | assignee (or any accepted member if unassigned) |
+
+Any other transition raises `ValueError("Invalid transition ...")`.
+
+### When to use `chat_task_create` vs `chat_send`
+
+Decision rule: *does this work item have an acceptance criterion that someone needs to check off later?*
+
+- **Yes** → `chat_task_create`. The status tracking buys you the audit, and the role gate buys you the review contract.
+- **No** → `chat_send`. Free-form coordination, broadcast or `to`-scoped per the per-recipient routing section.
+
+**Anti-pattern**: turning every utterance into a task. The point of structured tasks is to surface the *decisions that need a review verdict* — "approve this" or "request changes on that." If a message doesn't carry that semantic, it's a message. Treating every line of coordination as a task drowns the task list and defeats `chat_task_status` as a "what needs my attention" view.
+
+### Walkthrough: master/agent delegation
+
+Setup: a 2-member chat where `master` is the creator and `agent` has joined (handshake or auto-accept allowlist — see the per-recipient routing + auto-accept section for the friction-free path).
+
+1. **Master creates the task.**
+   ```
+   chat_task_create(
+       chat_id=<id>,
+       body="implement the auto-accept allowlist (see Phase B spec §3)",
+       assignee="agent",
+   )
+   → {task_id: "task-abc123", status: "pending", assignee_id: "agent-uuid"}
+   ```
+
+2. **Agent picks it up.** (In v1, the agent learns about the new task via `chat_task_status` or a heads-up `chat_send` — see the known-limitation callout below.)
+   ```
+   chat_task_update(task_id="task-abc123", new_status="in_progress")
+   ```
+
+3. **Agent finishes.**
+   ```
+   chat_task_update(task_id="task-abc123", new_status="done", note="PR #042")
+   ```
+
+4. **Master reviews.** Either:
+   ```
+   chat_task_update(task_id="task-abc123", new_status="approved", note="LGTM")
+   ```
+   …or…
+   ```
+   chat_task_update(task_id="task-abc123", new_status="changes_requested", note="missing test for the empty-allowlist case")
+   ```
+
+5. **Rework loop** (if `changes_requested`): agent transitions back to `in_progress`, eventually to `done`, master re-reviews. Each cycle is visible in `chat_task_status`'s `last_update_ts` + `last_note`.
+
+### `chat_task_status` as audit primitive
+
+```
+chat_task_status(chat_id) → [
+    {task_id, body, assignee_name, status, last_update_ts, last_note, ...},
+    ...
+]
+```
+
+One call returns the folded current state of every task in the chat. Use it for *"what's blocking me"* (filter `status == "pending"`), *"what's awaiting my approval"* (`status == "done"` and you're the master), *"what got approved this week"* (`status == "approved"`, sort by `last_update_ts`). Cheap — it's a fold over the chat's JSONL, no separate index.
+
+### Known v1 limitation: task records don't push channel blocks
+
+`chat_task_create` and `chat_task_update` write `kind=task` and `kind=task_update` records to the JSONL and broadcast them on the daemon's SSE stream — but the chat MCP subprocess's `_proactive_sse_loop` currently filters on `kind=msg` when emitting channel notifications. Result: in v1, assignees won't see a channel block when a task is created or transitioned. They need to either poll `chat_task_status` or you need to send a heads-up `chat_send` alongside.
+
+Planned for **Phase B v1.1** — see "Phase B v1.1 follow-ups" below.
+
+### Gotchas
+
+- **`approved` is terminal.** No re-open path in v1. Create a fresh task if you need to rework after approval.
+- **Unassigned tasks are first-come-first-served.** No lock; whichever accepted member fires `pending → in_progress` first claims it. For exclusive work, set an assignee at create time.
+- **The MCP enum doesn't include `pending`.** It's a creation-only state — there's no transition *to* pending. The enum lists only valid `new_status` targets.
+- **Master is implicit, not declared.** v1 binds master = creator. If the creator leaves the chat (`chat_leave`), no other member inherits master powers in v1 — `done → approved` becomes unreachable until they re-join. Plan ownership accordingly.
+
+## Phase B v1.1 follow-ups
+
+Two improvements are already designed and queued, both small in scope:
+
+1. **Task records push channel notifications.** Extend the chat MCP subprocess's `_proactive_sse_loop` filter from `kind == "msg"` to `kind in {msg, task, task_update}`. Routing:
+   - `kind == "task"` → push channel block to `[assignee]` if set, else broadcast to accepted members.
+   - `kind == "task_update"` → push to `[task.assignee, task.creator]` (or just creator if unassigned). Closes the inverse "did the agent finish?" polling gap on the master's side.
+   - Channel-block body format: `📋 task <id> [<status>] from <by_name>: <body or note>` — concise enough to glance at without scrolling.
+
+   ~30 LOC + 2 tests. Once shipped, the `to=[...]` mechanism from Phase B becomes the natural implementation layer — the two features compose.
+
+2. **Wiring auto-accept across session reboots.** Today the allowlist is keyed by session UUID, which Claude Code regenerates each boot — so the persisted allowlist is useless past a single session's lifetime. The fix: also persist a per-friendly-name copy at `~/.local/state/khimaira/chats/auto-accept-by-name-<name>.json`. The SessionStart hook (after `session_set_name`) re-applies the by-name file to the new UUID. Survives reboots; matches `session_set_name` as the durable identity primitive everywhere else in khimaira. ~50 LOC + 3 tests.
+
+Phase B+ items still in [`tasks/khimaira-chat/PHASE-B-VISION.md`](../tasks/khimaira-chat/PHASE-B-VISION.md) that did NOT land in v1.0 / v1.1:
+
+- **Future-session invites** — invite a session NAME that doesn't exist yet; daemon queues the invite, fires it when a session registers under that name.
 - **Phantom-truncation across hops** — when one agent receives a truncated body and re-relays, the cut propagates silently. Mitigations under discussion.
+- **Trust + identity (Phase C seed)** — cryptographic peer identity to harden the auto-accept allowlist's name-collision caveat. Deferred — the single-user local-daemon model doesn't need it yet.
 
 ## References
 
@@ -465,4 +672,4 @@ Captured at length in [`tasks/khimaira-chat/PHASE-B-VISION.md`](../tasks/khimair
 - [`tasks/khimaira-chat/IMPLEMENTATION.md`](../tasks/khimaira-chat/IMPLEMENTATION.md) — original Phase A spec
 - [`tasks/khimaira-chat/RESEARCH-daemon-push.md`](../tasks/khimaira-chat/RESEARCH-daemon-push.md) — initial spike that found the channels primitive
 - [`tasks/khimaira-chat/PHASE-B-VISION.md`](../tasks/khimaira-chat/PHASE-B-VISION.md) — master/agent orchestration vision + open design questions
-- Co-authored via the chat mechanism it documents — see commits `0b02304` (proactive subscriber) and `bc904c3` (ancestor-walk ppid bridge) for the load-bearing fixes that made true auto-delivery work.
+- Co-authored via the chat mechanism it documents — see commits `0b02304` (proactive subscriber) and `bc904c3` (ancestor-walk ppid bridge) for the load-bearing fixes that made true auto-delivery work; commit `10baa6d` for Phase B (per-recipient routing, structured tasks, auto-accept) and `f61b9f7` for the Phase B slash commands.
