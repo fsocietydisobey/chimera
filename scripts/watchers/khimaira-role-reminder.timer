@@ -1,0 +1,14 @@
+[Unit]
+Description=khimaira — re-fire role-directive emits every 10 min for idle-session wake-up
+Documentation=https://github.com/fsocietydisobey/khimaira
+
+[Timer]
+# Every 10 minutes at :43 past — offset from the bottleneck-watch :13 so
+# the two watchers don't race for daemon HTTP, and avoids fleet-effect
+# even-minute spikes.
+OnCalendar=*-*-* *:0/10:43
+Persistent=true
+Unit=khimaira-role-reminder.service
+
+[Install]
+WantedBy=timers.target

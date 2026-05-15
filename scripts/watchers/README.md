@@ -49,6 +49,29 @@ Under `$XDG_STATE_HOME/khimaira/` (default `~/.local/state/khimaira/`):
 - `bottleneck-watch.last-deputize` — T2 cooldown timestamp.
 - `bottleneck-watch.log`           — append-only log of every invocation.
 
+### `khimaira-role-reminder-broadcast.sh` (v1.7.3)
+
+Periodic re-fire of v1.5 role-directive emits for every (chat, member, role)
+triplet where role is in `ROLE_BUDGET`. Closes the gap where v1.5 fires ONLY
+on role-CHANGE events: stable role assignments never see a push unless the
+user submits a prompt. This watcher fires the same daemon-side directive
+helper used by `chat_create_room` / `chat_grant_role` / `chat_set_creator`,
+so each directive lands as a channel block via SSE to the target session —
+the same real-time push mechanism task assignments use.
+
+**Why this matters**: idle sessions wake up via channel-block delivery,
+which is the only mechanism that surfaces context WITHOUT requiring user
+prompt submission. Pairs with v1.7.2 (UserPromptSubmit per-turn reminder)
+to cover both active and idle session paths.
+
+Frequency: every 10 minutes (configurable via the `.timer` `OnCalendar`).
+The bottleneck-watch fires at :13 every 5 min; role-reminder fires at :43
+every 10 min — offset so they don't race for daemon HTTP.
+
+State / logs: appends to `~/.local/state/khimaira/role-reminder.log`. No
+state file (idempotent — re-firing the same directive is harmless; the
+SSE consumer dedupes by event_id implicitly).
+
 ## Install
 
 ```bash
