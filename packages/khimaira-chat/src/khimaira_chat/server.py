@@ -86,6 +86,10 @@ class _SubprocessState:
         self.session_id: str | None = None
         self.last_event_id: str | None = None
         self.subscriber_task: asyncio.Task | None = None
+        # write_stream captured at stdio_server() time so the SSE
+        # subscriber can emit notifications/claude/channel directly,
+        # without needing the session object from request_context.
+        self.write_stream: Any = None
 
     def register(self, session_id: str) -> None:
         if self.session_id is None:
@@ -501,7 +505,86 @@ async def _serve() -> None:
         instructions=INSTRUCTIONS,
     )
     async with stdio_server() as (read_stream, write_stream):
+        # Capture the write_stream globally so the SSE subscriber can
+        # emit notifications/claude/channel directly — no session
+        # object, no tool-call gating. This is the unlock for true
+        # auto-delivery: subscriber starts at boot, pushes events
+        # the moment they arrive, agent sees them on next turn.
+        _state.write_stream = write_stream
+        if _state.session_id and _state.subscriber_task is None:
+            _state.subscriber_task = asyncio.create_task(_proactive_sse_loop())
         await server.run(read_stream, write_stream, init_opts)
+
+
+async def _proactive_sse_loop() -> None:
+    """Subscribe to the daemon's SSE stream and emit channel
+    notifications directly to write_stream — bypassing the session
+    object, so the subscriber runs WITHOUT waiting for any agent
+    tool call. The whole point of channels.
+    """
+    assert _state.session_id is not None
+    assert _state.write_stream is not None
+    log.info(
+        "khimaira-chat: proactive SSE subscriber starting for session_id=%s",
+        _state.session_id,
+    )
+    async for record in daemon_client.subscribe_events(
+        _state.session_id, last_event_id=_state.last_event_id
+    ):
+        evt_id = record.get("event_id")
+        if evt_id:
+            _state.last_event_id = evt_id
+        kind = record.get("kind")
+
+        if (
+            kind == "member"
+            and record.get("state") == "pending"
+            and record.get("session_id") == _state.session_id
+        ):
+            chat_id = record.get("chat_id", "")
+            inviter = record.get("invited_by", "someone")
+            content = (
+                f"{inviter} invited you to chat {chat_id}. "
+                f"Accept with `/khimaira-chat-accept` or decline with "
+                f"`/khimaira-chat-reject` (no chat_id needed — defaults "
+                f"to this invite)."
+            )
+            meta = {"chat_id": str(chat_id), "kind": "invite", "from": str(inviter)}
+            await _direct_channel_notify(content, meta)
+            continue
+
+        if kind != "msg":
+            continue
+
+        sender_id = record.get("sender_id")
+        if sender_id == _state.session_id:
+            continue  # don't echo own messages
+
+        content = record.get("body", "")
+        meta = {
+            "chat_id": str(record.get("chat_id", "")),
+            "sender": str(record.get("sender_name") or sender_id or ""),
+            "msg_id": str(record.get("id", "")),
+        }
+        await _direct_channel_notify(content, meta)
+
+
+async def _direct_channel_notify(content: str, meta: dict[str, str]) -> None:
+    """Write a notifications/claude/channel message directly to the
+    captured write_stream — equivalent to what session.send_message
+    would do but without needing the session object."""
+    if _state.write_stream is None:
+        return
+    notif = types.JSONRPCNotification(
+        jsonrpc="2.0",
+        method="notifications/claude/channel",
+        params={"content": content, "meta": meta},
+    )
+    msg = SessionMessage(message=types.JSONRPCMessage(root=notif))
+    try:
+        await _state.write_stream.send(msg)
+    except Exception as exc:
+        log.warning("khimaira-chat: direct channel notify failed — %s", exc)
 
 
 def _ancestor_pids(max_depth: int = 5) -> list[int]:
