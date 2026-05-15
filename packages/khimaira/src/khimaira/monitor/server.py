@@ -108,6 +108,49 @@ def build_app():
         scheduler_mod.replay()
         asyncio.create_task(scheduler_mod.scheduler_loop())
 
+    # Chat MCP registration watchdog. Claude Code intermittently prunes
+    # the khimaira-chat entry from ~/.claude.json (subprocess errors
+    # during daemon restart, MCP supervisor health-check, or some
+    # other unknown trigger). Polling here every 30s ensures the entry
+    # always exists, so users can launch `claude-chat` at any time
+    # without hitting "no MCP server configured." The hook-based
+    # self-heal helps but only fires per-session-boot; this watchdog
+    # bridges the gap when the prune happens between launches.
+    @app.on_event("startup")
+    async def _start_chat_mcp_watchdog() -> None:
+        async def _watchdog() -> None:
+            import subprocess
+
+            register_cmd = [
+                "claude", "mcp", "add", "khimaira-chat", "-s", "user", "--",
+                "bash", "-lc",
+                "uv --directory ~/dev/khimaira run khimaira-chat 2>>/tmp/khimaira-chat.log",
+            ]
+            while True:
+                try:
+                    proc = await asyncio.to_thread(
+                        subprocess.run,
+                        ["claude", "mcp", "list"],
+                        capture_output=True, text=True, timeout=10.0,
+                    )
+                    if "khimaira-chat" not in (proc.stdout or ""):
+                        await asyncio.to_thread(
+                            subprocess.run,
+                            register_cmd, capture_output=True, text=True, timeout=10.0,
+                        )
+                        print(
+                            "khimaira monitor: chat-mcp watchdog re-registered khimaira-chat",
+                            file=sys.stderr,
+                        )
+                except Exception as exc:
+                    print(
+                        f"khimaira monitor: chat-mcp watchdog tick failed — {exc}",
+                        file=sys.stderr,
+                    )
+                await asyncio.sleep(30)
+
+        asyncio.create_task(_watchdog())
+
     # Auto-scan: kick off background metadata enrichment for any project
     # whose cache is missing or stale. The worker drains serially so we
     # don't hammer Gemini. Scans complete in the background; the topology
