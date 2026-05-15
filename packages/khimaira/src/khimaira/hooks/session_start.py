@@ -314,6 +314,162 @@ def _discover_other_active_sessions(
     return out
 
 
+# Phase B v1.6.1: role→budget recommendation table. Mirrors the ROLE_BUDGET
+# constant in packages/khimaira/src/khimaira/monitor/chats.py (Phase B v1.5).
+# Kept duplicated rather than imported because this hook must run in a
+# stdlib-only subprocess that boots fast; pulling in the chats module would
+# transitively pull all of monitor/* and slow SessionStart.
+_ROLE_BUDGET: dict[str, dict[str, str]] = {
+    "master": {"model": "opus", "effort": "max"},
+    "agent": {"model": "sonnet", "effort": "medium"},
+    "observer": {"model": "haiku", "effort": "default"},
+    # critic intentionally absent — no default
+}
+
+
+def _discover_chat_roles(session_id: str) -> list[dict]:
+    """Phase B v1.6.1: return role + recommended budget per chat this session
+    is an accepted member of. Closes the v1.5-directive-only-fires-on-change
+    gap — v1.5's role-grant directive surfaces state CHANGES; this surfaces
+    CURRENT STATE on session boot so a fresh window joining an existing chat
+    sees its role + recommended budget without having to query.
+
+    HTTP-primary: hits the daemon's /api/chats?session_id=... + per-chat
+    metadata fetch. Falls back to direct chat JSONL scan on daemon-down.
+
+    Returns list of dicts: chat_id, title, role, budget (or None for critic),
+    annotation (v1.6 deputize state if applicable).
+    """
+    chats_dir = _STATE_ROOT / "chats"
+
+    # --- HTTP path (preferred) ---
+    payload = _http_get_json(
+        f"/api/chats?session_id={urllib.parse.quote(session_id)}"
+    )
+    if payload is not None:
+        chats_list = payload.get("chats", []) or payload if isinstance(payload, list) else []
+        if isinstance(payload, dict) and "chats" in payload:
+            chats_list = payload["chats"]
+        results: list[dict] = []
+        for c in chats_list:
+            if not isinstance(c, dict):
+                continue
+            meta = c.get("meta") or c
+            chat_id = c.get("chat_id") or meta.get("chat_id") or ""
+            if not chat_id:
+                continue
+            # Verify caller is accepted member (skip pending/left/rejected/transferred-out)
+            members = c.get("members") or {}
+            my_member = members.get(session_id) if isinstance(members, dict) else None
+            if my_member and isinstance(my_member, dict):
+                if my_member.get("state") not in ("accepted",):
+                    continue
+            title = (meta.get("title") or "")[:50]
+            member_roles = meta.get("member_roles") or {}
+            role = member_roles.get(session_id)
+            if not role:
+                # v1-era implicit-master fallback
+                role = "master" if meta.get("created_by") == session_id else "agent"
+            annotation = ""
+            depy = meta.get("deputized_original_master")
+            if depy:
+                if depy == session_id:
+                    annotation = " (paused — vice active)"
+                elif role == "master":
+                    annotation = f" (vice — original: {depy[:8]})"
+            results.append(
+                {
+                    "chat_id": chat_id,
+                    "title": title,
+                    "role": role,
+                    "annotation": annotation,
+                    "budget": _ROLE_BUDGET.get(role),
+                }
+            )
+        if results:
+            return results
+        # HTTP returned no usable results — fall through to file scan for robustness
+
+    # --- Fallback: direct chat JSONL scan ---
+    if not chats_dir.exists():
+        return []
+    results = []
+    for path in sorted(chats_dir.glob("*.jsonl")):
+        records = _read_jsonl(path)
+        if not records:
+            continue
+        # Most recent meta record carries member_roles / created_by / deputize marker
+        last_meta = None
+        for r in reversed(records):
+            if r.get("kind") == "meta":
+                last_meta = r
+                break
+        if not last_meta:
+            continue
+        member_roles = last_meta.get("member_roles") or {}
+        role = member_roles.get(session_id)
+        if not role:
+            if last_meta.get("created_by") == session_id:
+                role = "master"
+            else:
+                continue  # not a member by either signal
+        # Verify accepted membership by walking member records — pick the
+        # latest member record for this session_id; skip if not accepted.
+        latest_state = None
+        for r in reversed(records):
+            if r.get("kind") == "member" and r.get("session_id") == session_id:
+                latest_state = r.get("state")
+                break
+        if latest_state and latest_state != "accepted":
+            continue
+        annotation = ""
+        depy = last_meta.get("deputized_original_master")
+        if depy:
+            if depy == session_id:
+                annotation = " (paused — vice active)"
+            elif role == "master":
+                annotation = f" (vice — original: {depy[:8]})"
+        results.append(
+            {
+                "chat_id": last_meta.get("chat_id") or path.stem,
+                "title": (last_meta.get("title") or "")[:50],
+                "role": role,
+                "annotation": annotation,
+                "budget": _ROLE_BUDGET.get(role),
+            }
+        )
+    return results
+
+
+def _format_chat_roles(roles: list[dict]) -> str:
+    """Phase B v1.6.1: render role-budget reminder block."""
+    if not roles:
+        return ""
+    lines = [
+        f"🎚️ khimaira chat roles + recommended budgets ({len(roles)} chat(s)):",
+        "",
+    ]
+    for r in roles:
+        chat_id_short = (r.get("chat_id") or "")[:18]
+        title = r.get("title") or ""
+        role = r.get("role") or "?"
+        annotation = r.get("annotation") or ""
+        budget = r.get("budget")
+        if budget:
+            budget_str = f"/model {budget['model']}, /effort {budget['effort']}"
+        else:
+            budget_str = "(no default — orchestrator's discretion)"
+        title_part = f' "{title}"' if title else ""
+        lines.append(f"  {chat_id_short}{title_part} — {role}{annotation} → {budget_str}")
+    lines.append("")
+    lines.append(
+        "Type the budget commands in this window if you want to match the "
+        "recommended tier. Reference: "
+        "docs/khimaira-chat.md#token-cost-budgeting"
+    )
+    return "\n".join(lines)
+
+
 def _consume_handoffs(session_id: str, cwd: str) -> list[dict]:
     """Read handoffs whose scope_cwd matches `cwd`; mark this session_id
     as having read them; return the matched set.
@@ -699,6 +855,7 @@ def main() -> int:
     cwd = data.get("cwd") or os.getcwd()
     handoffs = _consume_handoffs(session_id, cwd)
     tasks = _fetch_hook_safe_tasks()
+    chat_roles = _discover_chat_roles(session_id)
 
     if notes:
         blocks.append(_format_inbox(notes))
@@ -706,6 +863,8 @@ def main() -> int:
         blocks.append(_format_handoffs(handoffs, cwd))
     if tasks:
         blocks.append(_format_tasks(tasks))
+    if chat_roles:
+        blocks.append(_format_chat_roles(chat_roles))
     if others:
         blocks.append(_format_active_sessions(others))
 
