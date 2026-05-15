@@ -288,3 +288,66 @@ Test-master proposed an admin-only `chat_set_creator(chat_id, new_creator_sessio
 - **Lane R3** (MCP namespaces + handoff `_claim_role` + NodeRole + assembly): khimaira-0 — 2 patterns + synthesis
 
 Research only; no production code changed by this audit.
+
+---
+
+## Postscript — banked process patterns (Rounds 7-9)
+
+The patterns below are retrospective synthesis of how this crew (khimaira-0 + test-agent + test-master, with test-agent-2 joining for Round 9 close) navigated rounds where the default approach wouldn't have worked — they're findings-from-failure-modes-survived, not findings-from-research like the main audit body, and future readers should calibrate accordingly. Audit-before-design (Round 7) caught the namespace collision before it shipped; convention-before-enforcement (Round 8) emerged because v1.4 was forced to be docs-only; the three-mode gap-typology (Round 9) emerged because v1.5 needed a primitive shape that wasn't enforcement. Bank them as emergent crew habits the next crew can inherit, not doctrine.
+
+### Design-lifecycle patterns
+
+#### Audit-before-design
+
+Before lifting new vocabulary into the public API, cross-check it against existing role-shaped patterns in the codebase. This audit doc IS the artifact — Round 7 discovered that bare `roles` on `room.meta` would collide with `OrchestratorConfig.roles` at `config/router.py` (see F1 and top-line rec #1). Without the audit, v2 would have shipped a namespace-collision bug that would have surfaced as a config-router cross-wire weeks later. Origin: Joseph's Round 6 flag that the v2 design was reasoned in a vacuum.
+
+#### Convention-before-enforcement
+
+Ship new vocabulary as doc convention first; lift to code-enforcement only when a forcing function appears. Rounds 7-8 / v1.4 were the canonical example — the v1.4 docs landed role-routing conventions (model + thinking-mode by role) without a line of code-enforcement, on the bet that the convention would either reveal the actual failure mode or hold without enforcement. Convention reveals the gap by being violated; enforcement design comes AFTER you know which gap you're closing. Don't default to a `recommended_budget` slot just because the JSON has the slot.
+
+#### Three-stage maturation arc
+
+Design work matures research → convention → maybe enforcement. v1.4 (convention) followed Round 7 (research / audit); v1.5 explored what the third stage looks like when "maybe enforcement" turns out to be "actually, a recommendation primitive." The arc is not a fixed three-stage progression — the third stage's SHAPE depends on which gap convention reveals (see gap-typology, next). Decision ref: `10bb1af050a3` (test-agent, Round 8 close).
+
+#### Gap typology (compliance / application / awareness)
+
+When a convention reveals a gap, the gap-TYPE determines the primitive shape:
+
+| Gap type | What's failing | Primitive shape | This codebase's example |
+|---|---|---|---|
+| **Compliance** | People know the rule and ignore it | Enforcement | v2 `member_roles` + authority gates (this doc's main body) |
+| **Application** | People want to follow the rule but don't realize it applies right now | Just-in-time recommendation | v1.5 role-directive emit on `chat_grant_role` |
+| **Awareness** | People don't know the convention exists | Discoverability surface | Scarlet / Séance indexing; NodeRole visual taxonomy (C2) |
+
+Convention reveals WHICH gap; primitive matches the gap-type. Don't default to enforcement (the heavy hammer) for an application gap — a recommendation primitive is lighter and matches the failure mode better. Lift speed correlates with how directly the user hits the gap (v1.5 was fast because application-gap failure is loud; v1 → v2 was slow because compliance gaps mature only after a hard break). Decision ref: `69d2c7fb3dcc` (test-agent + test-master, Round 9 mid).
+
+### Cross-session coordination patterns
+
+#### Master-vs-team-consensus tiebreak
+
+When team consensus is stable across two cycles AND the master's counter-argument is consistency/simplicity (not correctness), master defers to consensus. Round 9 spent three cycles flip-flopping on whether the critic role should emit informationally because the master kept voting against converged team preference on simplicity grounds. The tiebreak rule: simplicity-arguments yield to correctness-arguments when decision costs are comparable and the team is two-aligned. Preserves "trust but verify" without "trust until they break consensus, then re-trust." Origin: Round 9, learned the hard way during the critic-emit flip-flop.
+
+#### 🔒 LOCKED message protocol — cross-greenlights mitigation
+
+Async multi-agent chat coordination has no built-in causality enforcement — two participants composing messages simultaneously will produce overlapping timelines, and a greenlight embedded in a longer message about other things creates scrollback-reconstruction work for workers. The mitigation has two complementary flavors, addressed to different actors:
+
+- **Proactive (master-facing)** — at design-discussion close, post one canonical `🔒 LOCKED:` message enumerating final decisions with msg-ID references. Both lanes code against the one canonical message, not scrollback. (test-master, Round 9 close; decision ref `ed9953cc2494`.)
+- **Reactive (worker-facing)** — when a greenlight arrives in chat, verify it references your CURRENT proposal, not a stale one. Protocol cost (one clarifying question) is much smaller than rework cost when the master's greenlight referenced a stale version. (test-agent, Round 9 mid; decision ref `418a226d6ca5`.)
+
+The proactive flavor minimizes the failure surface; the reactive flavor handles residual cases where the master forgets to post LOCKED. Both belong.
+
+#### "The dance is the deliverable"
+
+When the work product IS cross-surface consistency (multiple files carrying the same prose, the same anchor target, the same vocabulary), the multi-agent outline-greenlight-draft-review-rework-approve lifecycle IS the value — not friction on top of solo authorship. Solo authorship buys speed for an 80-LOC markdown change; multi-agent buys convergence-by-construction across the three surfaces. Future rounds should distinguish "is the deliverable the artifact or the consistency?" before deciding orchestration overhead is too heavy. Origin: Round 8 close, test-agent's observation.
+
+### Small habits / hygiene
+
+#### Defensive `sender_id != SYSTEM_SENDER_ID` filter in count-assertion tests
+
+Tests asserting on user-message counts should filter out system messages defensively, even before any system messages exist in the fixtures. Future system-message surfaces (audit events, rate-limit warnings, role directives, etc.) won't silently break message-count assertions if the filter is in place from day one. Origin: Round 9, test-agent (caught while wiring v1.5 role-directive emit — the new system messages broke three pre-existing tests with implicit count expectations).
+
+#### `grep -iE "step\s+[0-9]"` for renumbering audits
+
+When renumbering numbered headers in a doc, audit BOTH header-form references (`## Step 3`) AND prose-form references (`see step 3 above`). Case-insensitive search-FOR is the correct shape — exclude-headers grep misses prose mentions; case-sensitive search misses lowercase prose. Origin: Round 8, test-master (caught during the v1.4 docs renumbering when one prose reference was missed by the first-pass grep).
+
+---
