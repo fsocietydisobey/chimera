@@ -29,8 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _STATE_ROOT = (
-    Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")))
-    / "khimaira"
+    Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))) / "khimaira"
 )
 _BASE_DIR = _STATE_ROOT / "sessions"
 _HANDOFFS_PATH = _STATE_ROOT / "handoffs.jsonl"
@@ -425,8 +424,7 @@ def _format_handoffs(handoffs: list[dict], cwd: str) -> str:
     # --- OWNED handoffs — full directive framing ---
     if owned:
         lines.append(
-            f"📦 khimaira handoffs — {len(owned)} directive(s) you now OWN "
-            f"in this project ({cwd}):"
+            f"📦 khimaira handoffs — {len(owned)} directive(s) you now OWN in this project ({cwd}):"
         )
         lines.append("")
         for h in owned:
@@ -588,6 +586,22 @@ def main() -> int:
         "When you call `mcp__khimaira__session_log_*` / `session_set_*` tools, "
         "pass this id as `session_id`. Other sessions can refer to you by name "
         "after you call `session_set_name(...)`."
+    )
+
+    # Chat MCP subprocess needs to know its session_id to subscribe to the
+    # daemon's SSE event stream. There's no CLAUDE_SESSION_ID env var, so
+    # the agent has to pass it via the first chat tool call. This block
+    # nudges the agent to make that call early — without it, channel-pushed
+    # chat messages won't arrive until the agent happens to use a chat
+    # tool. Tool-not-found errors (chat MCP not registered) are silently
+    # ignored by the agent, so emitting unconditionally is safe.
+    blocks.append(
+        "💬 To enable real-time chat delivery in this session, call "
+        f'`mcp__khimaira-chat__chat_my_chats(session_id="{session_id}")` '
+        "once now. This registers the chat subprocess + starts the SSE "
+        'subscriber so incoming `<channel source="khimaira-chat" ...>` '
+        "messages arrive automatically. Skip if `khimaira-chat` MCP isn't "
+        "registered (the tool simply won't exist)."
     )
 
     notes = _consume_inbox(session_id)

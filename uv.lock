@@ -11,6 +11,7 @@ resolution-markers = [
 [manifest]
 members = [
     "khimaira",
+    "khimaira-chat",
     "khimaira-scarlet",
     "khimaira-seance",
     "khimaira-sibyl",
@@ -1045,6 +1046,21 @@ requires-dist = [
 provides-extras = ["all"]
 
 [[package]]
+name = "khimaira-chat"
+version = "0.1.0"
+source = { editable = "packages/khimaira-chat" }
+dependencies = [
+    { name = "httpx" },
+    { name = "mcp", extra = ["cli"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.0" },
+]
+
+[[package]]
 name = "khimaira-scarlet"
 version = "0.2.0"
 source = { editable = "packages/scarlet" }
@@ -1174,6 +1190,7 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "khimaira" },
+    { name = "khimaira-chat" },
     { name = "khimaira-scarlet" },
     { name = "khimaira-seance" },
     { name = "khimaira-sibyl" },
@@ -1193,6 +1210,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "khimaira", editable = "packages/khimaira" },
+    { name = "khimaira-chat", editable = "packages/khimaira-chat" },
     { name = "khimaira-scarlet", editable = "packages/scarlet" },
     { name = "khimaira-seance", editable = "packages/seance" },
     { name = "khimaira-sibyl", editable = "packages/sibyl" },

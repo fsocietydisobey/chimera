@@ -12,6 +12,7 @@ requires-python = ">=3.12"
 # below to redirect each name to the workspace member rather than PyPI.
 dependencies = [
     "khimaira",
+    "khimaira-chat",
     "khimaira-scarlet",
     "khimaira-seance",
     "khimaira-sibyl",
@@ -29,6 +30,7 @@ members = ["packages/*", "shared/*"]
 # resolve via `from seance import ...` etc. (package directories
 # unchanged); only the PyPI distribution names changed.
 khimaira = { workspace = true }
+khimaira-chat = { workspace = true }
 khimaira-scarlet = { workspace = true }
 khimaira-seance = { workspace = true }
 khimaira-sibyl = { workspace = true }

@@ -28,6 +28,13 @@ mcp_servers:
     # crashed launch leaves a breadcrumb the user can find via doctor.
     command: bash -lc 'uv --directory ~/dev/khimaira run khimaira mcp 2>>/tmp/khimaira.log'
 
+  - name: khimaira-chat
+    # Cross-session real-time chat MCP. Spawned as stdio subprocess by
+    # Claude Code per session. Talks to khimaira-monitor (HTTP/SSE) for
+    # state + fan-out. Channels are research-preview, so peers must
+    # launch with `--dangerously-load-development-channels server:khimaira-chat`.
+    command: bash -lc 'uv --directory ~/dev/khimaira run khimaira-chat 2>>/tmp/khimaira-chat.log'
+
 # No repos block: the default assumes khimaira itself is already cloned
 # (bootstrap is being run from inside it). Profiles that want sibling
 # MCP servers (seance/specter/scarlet/etc.) declare them under `repos`
