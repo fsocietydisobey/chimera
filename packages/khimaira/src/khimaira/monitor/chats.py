@@ -43,6 +43,25 @@ REMOVED = "removed"
 META = "meta"
 MEMBER = "member"
 MSG = "msg"
+TASK = "task"
+TASK_UPDATE = "task_update"
+
+# Task status values.
+TASK_PENDING = "pending"
+TASK_IN_PROGRESS = "in_progress"
+TASK_DONE = "done"
+TASK_APPROVED = "approved"
+TASK_CHANGES_REQUESTED = "changes_requested"
+
+# (from_status, to_status) → roles allowed to perform the transition.
+# "master" = chat creator; "assignee_or_any" = assignee if set, else any accepted member.
+_TASK_TRANSITIONS: dict[tuple[str, str], set[str]] = {
+    (TASK_PENDING, TASK_IN_PROGRESS): {"assignee_or_any"},
+    (TASK_IN_PROGRESS, TASK_DONE): {"assignee_or_any"},
+    (TASK_DONE, TASK_APPROVED): {"master"},
+    (TASK_DONE, TASK_CHANGES_REQUESTED): {"master"},
+    (TASK_CHANGES_REQUESTED, TASK_IN_PROGRESS): {"assignee_or_any"},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +234,20 @@ def create_room(
     }
     _append(chat_id, meta)
 
-    # Creator is auto-accepted; others go pending.
+    # Creator auto-accepted; others either auto-accepted (allowlist) or pending.
     for sid in resolved_members:
-        state = ACCEPTED if sid == creator_session_id else PENDING
+        if sid == creator_session_id:
+            state = ACCEPTED
+        elif should_auto_accept(sid, creator_session_id):
+            state = ACCEPTED
+            log.info(
+                "chats: %s auto-accepted invite from %s into %s",
+                sid,
+                creator_session_id,
+                chat_id,
+            )
+        else:
+            state = PENDING
         record = {
             "kind": MEMBER,
             "event_id": _new_event_id(),
@@ -346,8 +376,20 @@ def latest_pending_chat_id(session_id: str) -> str | None:
 _sanitize_message_body = sessions_mod.sanitize_agent_text
 
 
-def send_message(chat_id: str, sender_session_id: str, body: str) -> dict[str, Any]:
-    """Append a message. Sender must be an accepted member; otherwise 403-ish ValueError."""
+def send_message(
+    chat_id: str,
+    sender_session_id: str,
+    body: str,
+    *,
+    to: list[str] | None = None,
+) -> dict[str, Any]:
+    """Append a message. Sender must be an accepted member.
+
+    Optional `to`: list of session_ids/names. When set, real-time SSE
+    broadcast goes only to those sessions (plus sender for echo-drop).
+    The message is still appended to the JSONL — chat_history shows it
+    for everyone. Private-in-real-time, public-in-record.
+    """
     sender_session_id = _resolve_or_uuid(sender_session_id)
     room = load_room(chat_id)
     member = room["members"].get(sender_session_id)
@@ -357,6 +399,21 @@ def send_message(chat_id: str, sender_session_id: str, body: str) -> dict[str, A
             f"Session {sender_session_id!r} is {state!r} in {chat_id!r}; "
             f"only accepted members can send messages."
         )
+
+    resolved_to: list[str] | None = None
+    if to:
+        resolved_to = []
+        for r in to:
+            rid = _resolve_or_uuid(r)
+            rmember = room["members"].get(rid)
+            if not rmember or rmember["state"] != ACCEPTED:
+                rstate = (rmember or {}).get("state", "non-member")
+                raise ValueError(
+                    f"Recipient {r!r} is {rstate!r} in {chat_id!r}; "
+                    f"only accepted members can be `to` targets."
+                )
+            resolved_to.append(rid)
+
     record = {
         "kind": MSG,
         "event_id": _new_event_id(),
@@ -366,10 +423,233 @@ def send_message(chat_id: str, sender_session_id: str, body: str) -> dict[str, A
         "sender_id": sender_session_id,
         "sender_name": member.get("session_name") or sender_session_id[:8],
         "body": _sanitize_message_body(body),
+        "to": resolved_to,
     }
     _append(chat_id, record)
-    log.info("chats: msg from %s to %s", sender_session_id, chat_id)
+    log.info("chats: msg from %s to %s (to=%s)", sender_session_id, chat_id, resolved_to or "*")
     return record
+
+
+# ---------------------------------------------------------------------------
+# Phase B: tasks
+# ---------------------------------------------------------------------------
+
+
+def create_task(
+    chat_id: str,
+    sender_session_id: str,
+    body: str,
+    assignee_session_id: str | None = None,
+) -> dict[str, Any]:
+    """Append a TASK record (status=pending). Sender must be an accepted member;
+    if assignee_session_id is set, that session must also be accepted."""
+    sender_session_id = _resolve_or_uuid(sender_session_id)
+    room = load_room(chat_id)
+    member = room["members"].get(sender_session_id)
+    if not member or member["state"] != ACCEPTED:
+        state = (member or {}).get("state", "non-member")
+        raise ValueError(
+            f"Session {sender_session_id!r} is {state!r} in {chat_id!r}; "
+            f"only accepted members can create tasks."
+        )
+
+    assignee_resolved = None
+    assignee_name = None
+    if assignee_session_id is not None:
+        assignee_resolved = _resolve_or_uuid(assignee_session_id)
+        amember = room["members"].get(assignee_resolved)
+        if not amember or amember["state"] != ACCEPTED:
+            astate = (amember or {}).get("state", "non-member")
+            raise ValueError(
+                f"Assignee {assignee_session_id!r} is {astate!r} in {chat_id!r}; "
+                f"only accepted members can be assignees."
+            )
+        assignee_name = amember.get("session_name") or assignee_resolved[:8]
+
+    record = {
+        "kind": TASK,
+        "event_id": _new_event_id(),
+        "id": "task-" + uuid.uuid4().hex[:12],
+        "ts": _now_iso(),
+        "chat_id": chat_id,
+        "sender_id": sender_session_id,
+        "sender_name": member.get("session_name") or sender_session_id[:8],
+        "body": _sanitize_message_body(body),
+        "assignee_id": assignee_resolved,
+        "assignee_name": assignee_name,
+        "status": TASK_PENDING,
+    }
+    _append(chat_id, record)
+    log.info(
+        "chats: task %s created in %s by %s (assignee=%s)",
+        record["id"],
+        chat_id,
+        sender_session_id,
+        assignee_resolved or "(none)",
+    )
+    return record
+
+
+def update_task_status(
+    chat_id: str,
+    task_id: str,
+    by_session_id: str,
+    new_status: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Append a TASK_UPDATE record. Validates the from→to transition and
+    the caller's role (master vs assignee vs accepted-member)."""
+    by_session_id = _resolve_or_uuid(by_session_id)
+    room = load_room(chat_id)
+    member = room["members"].get(by_session_id)
+    if not member or member["state"] != ACCEPTED:
+        state = (member or {}).get("state", "non-member")
+        raise ValueError(
+            f"Session {by_session_id!r} is {state!r} in {chat_id!r}; "
+            f"only accepted members can update task status."
+        )
+
+    task_record = None
+    current_status = None
+    for line in _read(chat_id):
+        k = line.get("kind")
+        if k == TASK and line.get("id") == task_id:
+            task_record = line
+            current_status = line.get("status")
+        elif k == TASK_UPDATE and line.get("task_id") == task_id:
+            current_status = line.get("status")
+
+    if task_record is None:
+        raise ValueError(f"No task with id={task_id!r} in {chat_id!r}.")
+
+    transition = (current_status, new_status)
+    allowed_roles = _TASK_TRANSITIONS.get(transition)
+    if allowed_roles is None:
+        valid_targets = [t for (f, t) in _TASK_TRANSITIONS if f == current_status]
+        raise ValueError(
+            f"Invalid transition {current_status!r} → {new_status!r} for task {task_id!r}. "
+            f"From {current_status!r} you can go to: {valid_targets or '(terminal)'}."
+        )
+
+    creator = room["meta"].get("created_by")
+    is_master = by_session_id == creator
+    assignee = task_record.get("assignee_id")
+    is_assignee = assignee is not None and by_session_id == assignee
+
+    authorized = False
+    if "master" in allowed_roles and is_master:
+        authorized = True
+    if "assignee_or_any" in allowed_roles and (assignee is None or is_assignee):
+        authorized = True
+
+    if not authorized:
+        raise ValueError(
+            f"Session {by_session_id!r} not authorized for {current_status!r} → {new_status!r} "
+            f"on task {task_id!r}. Required roles: {sorted(allowed_roles)}."
+        )
+
+    record = {
+        "kind": TASK_UPDATE,
+        "event_id": _new_event_id(),
+        "ts": _now_iso(),
+        "chat_id": chat_id,
+        "task_id": task_id,
+        "status": new_status,
+        "by_session_id": by_session_id,
+        "by_name": member.get("session_name") or by_session_id[:8],
+        "note": note,
+    }
+    _append(chat_id, record)
+    log.info(
+        "chats: task %s %s → %s by %s in %s",
+        task_id,
+        current_status,
+        new_status,
+        by_session_id,
+        chat_id,
+    )
+    return record
+
+
+def task_status(chat_id: str, requester_session_id: str) -> list[dict[str, Any]]:
+    """Return all tasks in this chat with their current folded status.
+    Requester must be an accepted member."""
+    requester_session_id = _resolve_or_uuid(requester_session_id)
+    room = load_room(chat_id)
+    member = room["members"].get(requester_session_id)
+    if not member or member["state"] != ACCEPTED:
+        raise ValueError(
+            f"Session {requester_session_id!r} is not an accepted member of {chat_id!r}; "
+            f"cannot read task status."
+        )
+
+    tasks: dict[str, dict[str, Any]] = {}
+    for line in _read(chat_id):
+        k = line.get("kind")
+        if k == TASK:
+            tid = line["id"]
+            tasks[tid] = {
+                "task_id": tid,
+                "body": line.get("body"),
+                "assignee_id": line.get("assignee_id"),
+                "assignee_name": line.get("assignee_name"),
+                "sender_id": line.get("sender_id"),
+                "sender_name": line.get("sender_name"),
+                "status": line.get("status"),
+                "created_ts": line.get("ts"),
+                "last_update_ts": line.get("ts"),
+                "last_note": None,
+            }
+        elif k == TASK_UPDATE:
+            tid = line.get("task_id")
+            if tid in tasks:
+                tasks[tid]["status"] = line.get("status")
+                tasks[tid]["last_update_ts"] = line.get("ts")
+                tasks[tid]["last_note"] = line.get("note")
+
+    return sorted(tasks.values(), key=lambda t: t["created_ts"] or "")
+
+
+# ---------------------------------------------------------------------------
+# Phase B: auto-accept allowlist
+# ---------------------------------------------------------------------------
+
+
+def _auto_accept_path(session_id: str) -> Path:
+    return _chat_dir() / f"auto-accept-{session_id}.json"
+
+
+def set_auto_accept(session_id: str, allowlist: list[str]) -> dict[str, Any]:
+    """Replace this session's auto-accept allowlist. Pass [] to clear."""
+    session_id = _resolve_or_uuid(session_id)
+    _ensure_dir()
+    payload = {"allow": list(allowlist), "updated_at": _now_iso()}
+    _auto_accept_path(session_id).write_text(json.dumps(payload), encoding="utf-8")
+    log.info("chats: set auto-accept for %s → %d allowed peers", session_id, len(allowlist))
+    return payload
+
+
+def get_auto_accept(session_id: str) -> dict[str, Any]:
+    """Read this session's auto-accept allowlist; returns {'allow': []} if unset."""
+    session_id = _resolve_or_uuid(session_id)
+    path = _auto_accept_path(session_id)
+    if not path.is_file():
+        return {"allow": []}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"allow": []}
+
+
+def should_auto_accept(invitee_session_id: str, inviter_session_id: str) -> bool:
+    """True iff invitee has inviter (by UUID OR friendly name) in their allowlist."""
+    allow = get_auto_accept(invitee_session_id).get("allow", [])
+    if not allow:
+        return False
+    if inviter_session_id in allow:
+        return True
+    inviter_name = _resolve_session_name(inviter_session_id)
+    return bool(inviter_name and inviter_name in allow)
 
 
 def history(
@@ -522,7 +802,9 @@ def _gc_pending_sessions() -> None:
 
     now = time.time()
     expired = [
-        ppid for ppid, (_sid, ts) in _pending_session_by_ppid.items() if now - ts > _PPID_TTL_SECONDS
+        ppid
+        for ppid, (_sid, ts) in _pending_session_by_ppid.items()
+        if now - ts > _PPID_TTL_SECONDS
     ]
     for ppid in expired:
         _pending_session_by_ppid.pop(ppid, None)
@@ -560,9 +842,16 @@ def _broadcast(chat_id: str, record: dict[str, Any]) -> None:
                 log.warning("chats: dropping invite for %s (queue full)", invitee)
         return
 
-    # Default broadcast: to every accepted member.
+    # Phase B: per-recipient targeting on msg records.
+    targeted: set[str] | None = None
+    if record.get("kind") == MSG and record.get("to"):
+        targeted = set(record["to"]) | {record.get("sender_id")}
+
+    # Default broadcast: to every accepted member (or filtered by `to`).
     for sid, member in room["members"].items():
         if member["state"] != ACCEPTED:
+            continue
+        if targeted is not None and sid not in targeted:
             continue
         queues = _subscribers.get(sid)
         if not queues:

@@ -640,3 +640,230 @@ def test_subscribe_skips_messages_for_pending_members(isolated_chats):
     assert any(r.get("kind") == "member" and r.get("state") == "pending" for r in received)
     # But NO chat message should have been delivered.
     assert not any(r.get("kind") == "msg" for r in received)
+
+
+# ---------------------------------------------------------------------------
+# Phase B: per-recipient addressing
+# ---------------------------------------------------------------------------
+
+
+def test_send_message_with_to_records_recipients(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    _make_session(sessions_mod, "carol-uuid", "carol")
+    c.create_room("alice-uuid", ["bob-uuid", "carol-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    c.accept(chat_id, "bob-uuid")
+    c.accept(chat_id, "carol-uuid")
+    msg = c.send_message(chat_id, "alice-uuid", "for bob only", to=["bob-uuid"])
+    assert msg["to"] == ["bob-uuid"]
+
+
+def test_send_message_to_rejects_non_accepted_recipient(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.create_room("alice-uuid", ["bob-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    with pytest.raises(ValueError, match="pending"):
+        c.send_message(chat_id, "alice-uuid", "hi", to=["bob-uuid"])
+
+
+def test_send_message_no_to_preserves_broadcast(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.create_room("alice-uuid", ["bob-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    c.accept(chat_id, "bob-uuid")
+    msg = c.send_message(chat_id, "alice-uuid", "for everyone")
+    assert msg["to"] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase B: tasks
+# ---------------------------------------------------------------------------
+
+
+def _setup_two_member_chat(c, sessions_mod):
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.create_room("alice-uuid", ["bob-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    c.accept(chat_id, "bob-uuid")
+    return chat_id
+
+
+def test_create_task_records_pending_status(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_two_member_chat(c, sessions_mod)
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    assert task["status"] == c.TASK_PENDING
+    assert task["assignee_id"] == "bob-uuid"
+    assert task["id"].startswith("task-")
+
+
+def test_create_task_requires_accepted_member(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.create_room("alice-uuid", ["bob-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    with pytest.raises(ValueError, match="pending"):
+        c.create_task(chat_id, "bob-uuid", "do thing")
+
+
+def test_task_status_lifecycle_happy_path(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_two_member_chat(c, sessions_mod)
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    tid = task["id"]
+    c.update_task_status(chat_id, tid, "bob-uuid", c.TASK_IN_PROGRESS)
+    c.update_task_status(chat_id, tid, "bob-uuid", c.TASK_DONE)
+    c.update_task_status(chat_id, tid, "alice-uuid", c.TASK_APPROVED)
+    status = c.task_status(chat_id, "alice-uuid")
+    assert len(status) == 1
+    assert status[0]["status"] == c.TASK_APPROVED
+
+
+def test_task_non_assignee_cannot_progress(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    _make_session(sessions_mod, "carol-uuid", "carol")
+    c.create_room("alice-uuid", ["bob-uuid", "carol-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    c.accept(chat_id, "bob-uuid")
+    c.accept(chat_id, "carol-uuid")
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    with pytest.raises(ValueError, match="not authorized"):
+        c.update_task_status(chat_id, task["id"], "carol-uuid", c.TASK_IN_PROGRESS)
+
+
+def test_task_non_master_cannot_approve(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_two_member_chat(c, sessions_mod)
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    c.update_task_status(chat_id, task["id"], "bob-uuid", c.TASK_IN_PROGRESS)
+    c.update_task_status(chat_id, task["id"], "bob-uuid", c.TASK_DONE)
+    with pytest.raises(ValueError, match="not authorized"):
+        c.update_task_status(chat_id, task["id"], "bob-uuid", c.TASK_APPROVED)
+
+
+def test_task_changes_requested_can_resume(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_two_member_chat(c, sessions_mod)
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    tid = task["id"]
+    c.update_task_status(chat_id, tid, "bob-uuid", c.TASK_IN_PROGRESS)
+    c.update_task_status(chat_id, tid, "bob-uuid", c.TASK_DONE)
+    c.update_task_status(chat_id, tid, "alice-uuid", c.TASK_CHANGES_REQUESTED, note="redo X")
+    c.update_task_status(chat_id, tid, "bob-uuid", c.TASK_IN_PROGRESS)
+    assert c.task_status(chat_id, "alice-uuid")[0]["status"] == c.TASK_IN_PROGRESS
+
+
+def test_task_invalid_transition_raises(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_two_member_chat(c, sessions_mod)
+    task = c.create_task(chat_id, "alice-uuid", "do thing", assignee_session_id="bob-uuid")
+    with pytest.raises(ValueError, match="Invalid transition"):
+        c.update_task_status(chat_id, task["id"], "bob-uuid", c.TASK_DONE)
+
+
+# ---------------------------------------------------------------------------
+# Phase B: auto-accept allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_set_and_get_auto_accept_round_trip(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    c.set_auto_accept("alice-uuid", ["trusted-peer", "another-uuid"])
+    payload = c.get_auto_accept("alice-uuid")
+    assert payload["allow"] == ["trusted-peer", "another-uuid"]
+
+
+def test_should_auto_accept_matches_uuid(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    c.set_auto_accept("alice-uuid", ["bob-uuid"])
+    assert c.should_auto_accept("alice-uuid", "bob-uuid") is True
+
+
+def test_should_auto_accept_matches_friendly_name(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.set_auto_accept("alice-uuid", ["bob"])
+    assert c.should_auto_accept("alice-uuid", "bob-uuid") is True
+
+
+def test_should_auto_accept_returns_false_for_unknown_peer(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    c.set_auto_accept("alice-uuid", ["bob"])
+    assert c.should_auto_accept("alice-uuid", "carol-uuid") is False
+
+
+def test_create_room_auto_accepts_allowlisted_invitee(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.set_auto_accept("bob-uuid", ["alice"])
+    c.create_room("alice-uuid", ["bob-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    room = c.load_room(chat_id)
+    assert room["members"]["bob-uuid"]["state"] == c.ACCEPTED
+
+
+def test_create_room_keeps_pending_for_non_allowlisted(isolated_chats):
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.create_room("alice-uuid", ["bob-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    room = c.load_room(chat_id)
+    assert room["members"]["bob-uuid"]["state"] == c.PENDING
+
+
+def test_set_auto_accept_unknown_session_raises(isolated_chats):
+    """Per CLAUDE.md: every session-resolving primitive needs unknown-name coverage.
+    set_auto_accept calls _resolve_or_uuid which raises ValueError on unknown
+    names — the API endpoint must catch and 404.
+    """
+    c = isolated_chats
+    with pytest.raises(ValueError, match="No session"):
+        c.set_auto_accept("nope-not-real", ["whoever"])

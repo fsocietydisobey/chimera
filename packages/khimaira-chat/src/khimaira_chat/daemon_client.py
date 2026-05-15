@@ -151,12 +151,102 @@ def latest_pending(session_id: str, *, base: str = DEFAULT_BASE) -> str | None:
 
 
 def send_message(
-    chat_id: str, sender_session_id: str, body: str, *, base: str = DEFAULT_BASE
+    chat_id: str,
+    sender_session_id: str,
+    body: str,
+    *,
+    to: list[str] | None = None,
+    base: str = DEFAULT_BASE,
 ) -> dict[str, Any]:
+    """Send a message to a chat.
+
+    `to`: optional list of session ids/names. If provided and non-empty,
+    only those members receive the channel push. Omit / pass None to
+    broadcast to all accepted members as before.
+    """
+    payload: dict[str, Any] = {"sender_session_id": sender_session_id, "body": body}
+    if to:
+        payload["to"] = to
     resp = _request_with_retry(
         "POST",
         f"{base}/api/chats/{chat_id}/messages",
-        json={"sender_session_id": sender_session_id, "body": body},
+        json=payload,
+        timeout=10.0,
+    )
+    _raise_for_status(resp)
+    return resp.json()
+
+
+def create_task(
+    chat_id: str,
+    sender_session_id: str,
+    body: str,
+    *,
+    assignee_session_id: str | None = None,
+    base: str = DEFAULT_BASE,
+) -> dict[str, Any]:
+    """Create a structured task in a chat. Sender must be an accepted
+    member. Initial status is `pending`. If `assignee_session_id` is None
+    the task is unassigned (the next-up worker can claim it by moving it
+    to `in_progress`)."""
+    payload: dict[str, Any] = {"sender_session_id": sender_session_id, "body": body}
+    if assignee_session_id:
+        payload["assignee_session_id"] = assignee_session_id
+    resp = _request_with_retry(
+        "POST",
+        f"{base}/api/chats/{chat_id}/tasks",
+        json=payload,
+        timeout=10.0,
+    )
+    _raise_for_status(resp)
+    return resp.json()
+
+
+def update_task_status(
+    chat_id: str,
+    task_id: str,
+    by_session_id: str,
+    new_status: str,
+    *,
+    note: str | None = None,
+    base: str = DEFAULT_BASE,
+) -> dict[str, Any]:
+    """Move a task between lifecycle states."""
+    payload: dict[str, Any] = {"by_session_id": by_session_id, "new_status": new_status}
+    if note is not None:
+        payload["note"] = note
+    resp = _request_with_retry(
+        "POST",
+        f"{base}/api/chats/{chat_id}/tasks/{task_id}/status",
+        json=payload,
+        timeout=10.0,
+    )
+    _raise_for_status(resp)
+    return resp.json()
+
+
+def task_status(chat_id: str, session_id: str, *, base: str = DEFAULT_BASE) -> list[dict[str, Any]]:
+    """List tasks in a chat with current status. Requester must be an
+    accepted member."""
+    resp = _request_with_retry(
+        "GET",
+        f"{base}/api/chats/{chat_id}/tasks",
+        params={"session_id": session_id},
+        timeout=10.0,
+    )
+    _raise_for_status(resp)
+    return resp.json().get("tasks", [])
+
+
+def set_auto_accept(
+    session_id: str, allowlist: list[str], *, base: str = DEFAULT_BASE
+) -> dict[str, Any]:
+    """Set this session's auto-accept allowlist. Replaces (not additive).
+    Pass [] to clear."""
+    resp = _request_with_retry(
+        "POST",
+        f"{base}/api/sessions/{session_id}/auto-accept",
+        json={"session_id": session_id, "allowlist": allowlist},
         timeout=10.0,
     )
     _raise_for_status(resp)

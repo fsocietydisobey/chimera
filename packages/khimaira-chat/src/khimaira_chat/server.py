@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 from typing import Any
 
@@ -409,6 +408,130 @@ def _build_server() -> Server:
                     "required": ["session_id", "chat_id"],
                 },
             ),
+            # ---- Phase B tools ----
+            types.Tool(
+                name="chat_send_to",
+                description=(
+                    "Send a private message to a subset of chat members. Like "
+                    "chat_send but only the sessions in `to` receive the channel "
+                    "push. Use when you want to coordinate with a specific peer "
+                    "inside a multi-party chat (e.g. master sidebars an agent on a "
+                    "task without broadcasting to siblings). Other members can "
+                    "still see the message via chat_history — `to` controls push "
+                    "delivery, not durable visibility."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "chat_id": {"type": "string"},
+                        "body": {"type": "string"},
+                        "to": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Session ids/names that should receive the push",
+                        },
+                    },
+                    "required": ["session_id", "chat_id", "body", "to"],
+                },
+            ),
+            types.Tool(
+                name="chat_task_create",
+                description=(
+                    "Create a structured task in a chat with status lifecycle "
+                    "(pending → in_progress → done → approved | changes_requested). "
+                    "Use this INSTEAD of a free-form chat_send when the work needs "
+                    "explicit tracking — e.g. master/agent delegation where the "
+                    "master will later approve or send back for rework. The chat "
+                    "creator is the implicit master; only they can approve / "
+                    "request changes. Optional `assignee` pre-claims the task for "
+                    "a specific session; omit to leave unassigned for whoever picks "
+                    "it up first."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "chat_id": {"type": "string"},
+                        "body": {"type": "string", "description": "Task description / spec"},
+                        "assignee": {
+                            "type": "string",
+                            "description": "Optional session id or name to pre-assign",
+                        },
+                    },
+                    "required": ["session_id", "chat_id", "body"],
+                },
+            ),
+            types.Tool(
+                name="chat_task_update",
+                description=(
+                    "Move a task between lifecycle states. Valid transitions: "
+                    "pending→in_progress→done→approved|changes_requested. Master "
+                    "(chat creator) is the only one who can approve / request "
+                    "changes; the assignee (or any accepted member if unassigned) "
+                    "moves it through pending→in_progress→done. Use `note` to "
+                    "attach context — especially on approve/changes_requested where "
+                    "the master should explain the verdict."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "chat_id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "new_status": {
+                            "type": "string",
+                            "enum": ["in_progress", "done", "approved", "changes_requested"],
+                            "description": "Target state",
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "Optional human-readable context for the transition",
+                        },
+                    },
+                    "required": ["session_id", "chat_id", "task_id", "new_status"],
+                },
+            ),
+            types.Tool(
+                name="chat_task_status",
+                description=(
+                    "List all tasks in a chat with current status. Returns "
+                    "[{task_id, body, assignee, status, last_update_ts, last_note}]. "
+                    "Use this to check 'what's pending review' or 'what's been "
+                    "approved' without scanning the full message transcript."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "chat_id": {"type": "string"},
+                    },
+                    "required": ["session_id", "chat_id"],
+                },
+            ),
+            types.Tool(
+                name="chat_auto_accept_from",
+                description=(
+                    "Set this session's auto-accept allowlist. Invites from any "
+                    "peer in `allow` (matched by session name OR uuid) skip the "
+                    "pending state and go directly to accepted — no need for the "
+                    "agent to call chat_accept. Use for trusted master sessions "
+                    "that frequently spin up worker chats with this session. Pass "
+                    "an empty list to clear. REPLACES the prior list (not additive)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "allow": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Session names or uuids to auto-accept invites from",
+                        },
+                    },
+                    "required": ["session_id", "allow"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -485,6 +608,25 @@ async def _dispatch_tool(name: str, args: dict[str, Any]) -> Any:
         return daemon_client.leave(args["chat_id"], sid)
     if name == "chat_delete":
         return daemon_client.delete_chat(args["chat_id"], sid)
+    # ---- Phase B ----
+    if name == "chat_send_to":
+        return daemon_client.send_message(args["chat_id"], sid, args["body"], to=args["to"])
+    if name == "chat_task_create":
+        return daemon_client.create_task(
+            args["chat_id"], sid, args["body"], assignee_session_id=args.get("assignee")
+        )
+    if name == "chat_task_update":
+        return daemon_client.update_task_status(
+            args["chat_id"],
+            args["task_id"],
+            sid,
+            args["new_status"],
+            note=args.get("note"),
+        )
+    if name == "chat_task_status":
+        return daemon_client.task_status(args["chat_id"], sid)
+    if name == "chat_auto_accept_from":
+        return daemon_client.set_auto_accept(sid, args["allow"])
     raise ValueError(f"Unknown tool: {name!r}")
 
 
@@ -609,7 +751,7 @@ def _ancestor_pids(max_depth: int = 5) -> list[int]:
             break
         out.append(cur)
         try:
-            with open(f"/proc/{cur}/status", "r", encoding="utf-8") as f:
+            with open(f"/proc/{cur}/status", encoding="utf-8") as f:
                 next_pid = None
                 for line in f:
                     if line.startswith("PPid:"):

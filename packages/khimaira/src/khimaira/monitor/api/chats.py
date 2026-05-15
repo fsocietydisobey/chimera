@@ -45,6 +45,24 @@ class AcceptReq(BaseModel):
 class SendReq(BaseModel):
     sender_session_id: str
     body: str
+    to: list[str] | None = None  # Phase B: optional per-recipient addressing
+
+
+class CreateTaskReq(BaseModel):
+    sender_session_id: str
+    body: str
+    assignee_session_id: str | None = None
+
+
+class UpdateTaskStatusReq(BaseModel):
+    by_session_id: str
+    new_status: str
+    note: str | None = None
+
+
+class AutoAcceptReq(BaseModel):
+    session_id: str
+    allowlist: list[str]
 
 
 class LeaveReq(BaseModel):
@@ -172,9 +190,54 @@ def build_router():
     @router.post("/chats/{chat_id}/messages")
     async def send_message(chat_id: str, req: SendReq) -> dict:
         try:
-            return chats.send_message(chat_id, req.sender_session_id, req.body)
+            return chats.send_message(chat_id, req.sender_session_id, req.body, to=req.to)
         except ValueError as exc:
             raise fastapi.HTTPException(403, str(exc)) from exc
+
+    # ---- Phase B: tasks ----
+
+    @router.post("/chats/{chat_id}/tasks")
+    async def create_task(chat_id: str, req: CreateTaskReq) -> dict:
+        try:
+            return chats.create_task(
+                chat_id,
+                req.sender_session_id,
+                req.body,
+                assignee_session_id=req.assignee_session_id,
+            )
+        except ValueError as exc:
+            raise fastapi.HTTPException(403, str(exc)) from exc
+
+    @router.post("/chats/{chat_id}/tasks/{task_id}/status")
+    async def update_task_status(chat_id: str, task_id: str, req: UpdateTaskStatusReq) -> dict:
+        try:
+            return chats.update_task_status(
+                chat_id, task_id, req.by_session_id, req.new_status, note=req.note
+            )
+        except ValueError as exc:
+            # 403 for permission errors (master-only transitions); 404 for unknown task
+            msg = str(exc)
+            code = 403 if any(w in msg for w in ("creator", "assignee", "transition")) else 404
+            raise fastapi.HTTPException(code, msg) from exc
+
+    @router.get("/chats/{chat_id}/tasks")
+    async def list_tasks(chat_id: str, session_id: str) -> dict:
+        try:
+            return {"tasks": chats.task_status(chat_id, session_id)}
+        except ValueError as exc:
+            raise fastapi.HTTPException(403, str(exc)) from exc
+
+    # ---- Phase B: auto-accept ----
+
+    @router.post("/sessions/{session_id}/auto-accept")
+    async def set_auto_accept(session_id: str, req: AutoAcceptReq) -> dict:
+        # session_id from path is the source of truth; req.session_id should match
+        # but we accept the path version
+        try:
+            chats.set_auto_accept(session_id, req.allowlist)
+        except ValueError as exc:
+            raise fastapi.HTTPException(404, str(exc)) from exc
+        return {"ok": True, "session_id": session_id, "allowlist": req.allowlist}
 
     @router.get("/chats/{chat_id}/messages")
     async def get_history(
