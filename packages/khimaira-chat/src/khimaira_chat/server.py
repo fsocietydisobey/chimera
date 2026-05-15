@@ -105,34 +105,29 @@ _state = _SubprocessState()
 
 
 def _detect_claude_display_name() -> str | None:
-    """Read parent's argv to find a `-n <name>` / `--name <name>` flag.
+    """Walk the ancestor chain looking for `-n <name>` / `--name <name>`
+    in any parent's cmdline.
 
-    Claude Code's `-n NAME` sets a display name in its own session
-    metadata, but doesn't propagate that name into khimaira's session
-    registry — meaning `claude-chat -n test-agent` makes the session
-    findable via `claude -r test-agent` BUT chat_create_room(members=
-    ["test-agent"]) still 404s because the daemon doesn't know about
-    the name. Bridging that gap manually requires `/rename` after
-    launch, which is friction.
+    Claude Code's `-n NAME` sets a display name. We bridge that to
+    khimaira's friendly name by setting it server-side. But our
+    DIRECT parent is usually `uv` (since Claude Code spawns us via
+    `bash -lc 'uv run khimaira-chat'`), so we have to walk ancestors
+    until we find Claude Code's invocation argv.
 
-    By reading our parent process's argv (Claude Code is our parent
-    when spawned as a stdio MCP subprocess), we can detect the user's
-    intended name and propagate it to the daemon automatically.
-
-    Linux-only via /proc; returns None on other platforms or if the
-    flag isn't present.
+    Linux-only via /proc; returns None on other platforms or if no
+    ancestor's cmdline contains the flag.
     """
-    try:
-        ppid = os.getppid()
-        with open(f"/proc/{ppid}/cmdline", "rb") as f:
-            argv = f.read().decode("utf-8", errors="replace").split("\x00")
-        for i, arg in enumerate(argv):
-            if arg in ("-n", "--name") and i + 1 < len(argv):
-                name = argv[i + 1].strip()
-                if name:
-                    return name
-    except (OSError, IndexError, UnicodeDecodeError):
-        pass
+    for ppid in _ancestor_pids(max_depth=6):
+        try:
+            with open(f"/proc/{ppid}/cmdline", "rb") as f:
+                argv = f.read().decode("utf-8", errors="replace").split("\x00")
+            for i, arg in enumerate(argv):
+                if arg in ("-n", "--name") and i + 1 < len(argv):
+                    name = argv[i + 1].strip()
+                    if name:
+                        return name
+        except (OSError, IndexError, UnicodeDecodeError):
+            continue
     return None
 
 
