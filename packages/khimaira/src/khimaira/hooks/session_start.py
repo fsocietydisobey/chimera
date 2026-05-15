@@ -334,63 +334,17 @@ def _discover_chat_roles(session_id: str) -> list[dict]:
     CURRENT STATE on session boot so a fresh window joining an existing chat
     sees its role + recommended budget without having to query.
 
-    HTTP-primary: hits the daemon's /api/chats?session_id=... + per-chat
-    metadata fetch. Falls back to direct chat JSONL scan on daemon-down.
+    File-scan primary: walks ~/.local/state/khimaira/chats/*.jsonl directly
+    because the daemon's /api/chats list endpoint returns a light shape
+    (no member_roles, no created_by) which is insufficient for role
+    resolution. The JSONL META records are the authoritative source.
+    Per-chat HTTP fetch (a viable alternative) adds N round-trips per
+    session boot; file scan is one syscall per chat. v1.6.1.1 fix.
 
     Returns list of dicts: chat_id, title, role, budget (or None for critic),
     annotation (v1.6 deputize state if applicable).
     """
     chats_dir = _STATE_ROOT / "chats"
-
-    # --- HTTP path (preferred) ---
-    payload = _http_get_json(
-        f"/api/chats?session_id={urllib.parse.quote(session_id)}"
-    )
-    if payload is not None:
-        chats_list = payload.get("chats", []) or payload if isinstance(payload, list) else []
-        if isinstance(payload, dict) and "chats" in payload:
-            chats_list = payload["chats"]
-        results: list[dict] = []
-        for c in chats_list:
-            if not isinstance(c, dict):
-                continue
-            meta = c.get("meta") or c
-            chat_id = c.get("chat_id") or meta.get("chat_id") or ""
-            if not chat_id:
-                continue
-            # Verify caller is accepted member (skip pending/left/rejected/transferred-out)
-            members = c.get("members") or {}
-            my_member = members.get(session_id) if isinstance(members, dict) else None
-            if my_member and isinstance(my_member, dict):
-                if my_member.get("state") not in ("accepted",):
-                    continue
-            title = (meta.get("title") or "")[:50]
-            member_roles = meta.get("member_roles") or {}
-            role = member_roles.get(session_id)
-            if not role:
-                # v1-era implicit-master fallback
-                role = "master" if meta.get("created_by") == session_id else "agent"
-            annotation = ""
-            depy = meta.get("deputized_original_master")
-            if depy:
-                if depy == session_id:
-                    annotation = " (paused — vice active)"
-                elif role == "master":
-                    annotation = f" (vice — original: {depy[:8]})"
-            results.append(
-                {
-                    "chat_id": chat_id,
-                    "title": title,
-                    "role": role,
-                    "annotation": annotation,
-                    "budget": _ROLE_BUDGET.get(role),
-                }
-            )
-        if results:
-            return results
-        # HTTP returned no usable results — fall through to file scan for robustness
-
-    # --- Fallback: direct chat JSONL scan ---
     if not chats_dir.exists():
         return []
     results = []
