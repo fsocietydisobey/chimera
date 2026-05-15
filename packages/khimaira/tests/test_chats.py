@@ -123,8 +123,11 @@ def test_create_accept_send_round_trip(isolated_chats):
     assert msg["sender_id"] == "alice"
 
     history = c.history(chat_id, "bob")
-    assert len(history) == 1
-    assert history[0]["body"] == "hello bob"
+    # Phase B v1.5 emits a system role-directive on create_room — filter it
+    # out to assert on user messages only.
+    user_msgs = [m for m in history if m.get("sender_id") != c.SYSTEM_SENDER_ID]
+    assert len(user_msgs) == 1
+    assert user_msgs[0]["body"] == "hello bob"
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +290,11 @@ def test_three_member_group_round_trip(isolated_chats):
     c.send_message(chat_id, "bob", "hi alice")
 
     history = c.history(chat_id, "carol")
-    assert len(history) == 2
-    assert history[0]["sender_id"] == "alice"
-    assert history[1]["sender_id"] == "bob"
+    # Phase B v1.5: filter system role-directive out to assert on user messages.
+    user_msgs = [m for m in history if m.get("sender_id") != c.SYSTEM_SENDER_ID]
+    assert len(user_msgs) == 2
+    assert user_msgs[0]["sender_id"] == "alice"
+    assert user_msgs[1]["sender_id"] == "bob"
 
 
 # ---------------------------------------------------------------------------
@@ -965,8 +970,15 @@ def test_transfer_membership_round_trip_happy_path(isolated_chats):
     assert room["members"]["bob"]["state"] == c.TRANSFERRED_OUT
     assert room["members"]["dave"]["state"] == c.ACCEPTED
     # Carol — the third party — sees the system message in chat_history.
+    # Phase B v1.5 also emits a role-directive on create_room; filter by
+    # meta.event_type to isolate the transfer system message specifically.
     history = c.history(chat_id, "carol")
-    transfer_msg = [m for m in history if m.get("sender_id") == c.SYSTEM_SENDER_ID]
+    transfer_msg = [
+        m
+        for m in history
+        if m.get("sender_id") == c.SYSTEM_SENDER_ID
+        and (m.get("meta") or {}).get("event_type") == "transfer"
+    ]
     assert len(transfer_msg) == 1
     assert "transferred this chat" in transfer_msg[0]["body"]
     assert transfer_msg[0]["meta"]["event_type"] == "transfer"
@@ -1545,3 +1557,208 @@ def test_critic_can_send_and_read_but_not_approve(isolated_chats):
     c.update_task_status(chat_id, task["id"], "alice-uuid", c.TASK_DONE)
     with pytest.raises(ValueError, match="not authorized"):
         c.update_task_status(chat_id, task["id"], "bob-uuid", c.TASK_APPROVED)
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.5: role-grant directive emit
+# ---------------------------------------------------------------------------
+
+
+def _directives(c, chat_id: str) -> list[dict]:
+    """Return all role_directive system msg records in the chat's JSONL."""
+    return [
+        line
+        for line in c._read(chat_id)
+        if line.get("kind") == c.MSG
+        and line.get("sender_id") == c.SYSTEM_SENDER_ID
+        and (line.get("meta") or {}).get("event_type") == "role_directive"
+    ]
+
+
+def test_chat_create_room_emits_master_directive_to_creator(isolated_chats):
+    """Creating a chat fires a 🎚️ directive to the creator with master-tier
+    budget. v1.5 application-gap fix: tells Joseph which slash commands to
+    type at the moment the role is granted (implicit-master via created_by)."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    room = c.create_room("alice-uuid", [], title="t")
+    chat_id = room["meta"]["chat_id"]
+
+    directives = _directives(c, chat_id)
+    assert len(directives) == 1
+    d = directives[0]
+    assert d["to"] == ["alice-uuid"]
+    assert d["meta"]["role"] == c.ROLE_MASTER
+    assert d["meta"]["model"] == "opus"
+    assert d["meta"]["effort"] == "max"
+    assert "🎚️ Role updated: you are now master" in d["body"]
+    assert "/model opus" in d["body"]
+    assert "/effort max" in d["body"]
+
+
+def test_chat_grant_role_emits_directive_to_target(isolated_chats):
+    """Granting an agent role to a member fires a directive to that
+    member with the agent-tier budget."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_v1_chat(c, sessions_mod, "alice", "bob")
+
+    # Filter to directives emitted AFTER the create-room directive.
+    pre_count = len(_directives(c, chat_id))
+    c.chat_grant_role(chat_id, "alice", "bob", c.ROLE_AGENT)
+    post = _directives(c, chat_id)
+    assert len(post) == pre_count + 1
+
+    d = post[-1]
+    assert d["to"] == ["bob"]
+    assert d["meta"]["role"] == c.ROLE_AGENT
+    assert d["meta"]["model"] == "sonnet"
+    assert d["meta"]["effort"] == "medium"
+    assert "you are now agent" in d["body"]
+
+
+def test_chat_grant_role_master_swap_emits_two_directives(isolated_chats):
+    """Promoting B to master atomically demotes A (the implicit creator-
+    master). Two directives fire in the same call: one to B (new master,
+    opus/max), one to A (demoted, default agent tier sonnet/medium)."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_v1_chat(c, sessions_mod, "alice", "bob")
+
+    pre = _directives(c, chat_id)
+    c.chat_grant_role(chat_id, "alice", "bob", c.ROLE_MASTER)
+    post = _directives(c, chat_id)
+    new_directives = post[len(pre) :]
+    assert len(new_directives) == 2
+
+    by_target = {d["to"][0]: d for d in new_directives}
+    assert by_target["bob"]["meta"]["role"] == c.ROLE_MASTER
+    assert by_target["bob"]["meta"]["model"] == "opus"
+    assert by_target["alice"]["meta"]["role"] == c.ROLE_AGENT
+    assert by_target["alice"]["meta"]["model"] == "sonnet"
+
+
+def test_chat_grant_role_critic_emits_no_directive(isolated_chats):
+    """Critic role is intentionally absent from ROLE_BUDGET — no default
+    slash-command recommendation exists. Helper silent-skips; the role
+    grant still lands in member_roles META, but no 🎚️ directive fires.
+    The orchestrator can follow up with explicit guidance if needed."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    chat_id = _setup_v1_chat(c, sessions_mod, "alice", "bob")
+
+    pre_count = len(_directives(c, chat_id))
+    result = c.chat_grant_role(chat_id, "alice", "bob", c.ROLE_CRITIC)
+    # member_roles still updates — critic IS a valid role
+    assert result["member_roles"]["bob"] == c.ROLE_CRITIC
+    # but no directive emit
+    assert len(_directives(c, chat_id)) == pre_count
+
+
+# ---------------------------------------------------------------------------
+# Phase B v1.5 L2: directive emits on chat_set_creator + chat_transfer_membership
+# ---------------------------------------------------------------------------
+
+
+def test_set_creator_emits_master_directive(isolated_chats):
+    """Re-anchoring master via chat_set_creator on an orphaned chat fires a
+    🎚️ directive to the new creator with master-tier budget. Closes the
+    application-gap arc: the recipient knows their slash commands at the
+    moment they inherit master."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    _make_session(sessions_mod, "carol-uuid", "carol")
+    c.create_room("alice-uuid", ["bob-uuid", "carol-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    c.accept(chat_id, "bob-uuid")
+    c.accept(chat_id, "carol-uuid")
+
+    # Orphan the chat: alice transfers to dave (post-v1.3 propagates created_by),
+    # then we force created_by back to alice (simulating the pre-v1.3 broken state
+    # set_creator exists to repair). alice is now TRANSFERRED_OUT.
+    _make_session(sessions_mod, "dave-uuid", "dave")
+    c.transfer_membership(chat_id, "alice-uuid", "dave-uuid")
+    room = c.load_room(chat_id)
+    broken_meta = {
+        **{k: v for k, v in room["meta"].items() if k != "event_id"},
+        "kind": c.META,
+        "event_id": c._new_event_id(),
+        "ts": c._now_iso(),
+        "created_by": "alice-uuid",
+        "created_by_name": "alice",
+    }
+    c._append(chat_id, broken_meta)
+
+    pre_count = len(_directives(c, chat_id))
+    c.set_creator(chat_id, "bob-uuid")
+    post = _directives(c, chat_id)
+    assert len(post) == pre_count + 1, "set_creator should emit exactly one master directive"
+
+    d = post[-1]
+    assert d["to"] == ["bob-uuid"]
+    assert d["meta"]["role"] == c.ROLE_MASTER
+    assert d["meta"]["model"] == "opus"
+    assert d["meta"]["effort"] == "max"
+    assert "🎚️ Role updated: you are now master" in d["body"]
+    assert "/model opus" in d["body"]
+    assert "/effort max" in d["body"]
+
+
+def test_transfer_membership_master_swap_emits_directive(isolated_chats):
+    """When the chat creator transfers their membership, the receiving session
+    inherits master role — emit a directive to them so they know to switch to
+    master-tier slash commands. Pairs with the v1.3 META created_by swap
+    (Lane E) — that test asserts on the META update; this one asserts on the
+    directive that the v1.5 layer adds."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.create_room("alice-uuid", ["bob-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    c.accept(chat_id, "bob-uuid")
+
+    # Alice (creator/master) transfers to a fresh dave.
+    _make_session(sessions_mod, "dave-uuid", "dave")
+    pre_count = len(_directives(c, chat_id))
+    c.transfer_membership(chat_id, "alice-uuid", "dave-uuid")
+    post = _directives(c, chat_id)
+    assert len(post) == pre_count + 1, "master-transfer should emit exactly one directive"
+
+    d = post[-1]
+    assert d["to"] == ["dave-uuid"]
+    assert d["meta"]["role"] == c.ROLE_MASTER
+    assert "you are now master" in d["body"]
+    assert "/model opus" in d["body"]
+
+
+def test_transfer_membership_non_master_emits_no_directive(isolated_chats):
+    """Non-creator membership transfers should NOT fire role directives —
+    only the existing 📦 transfer system message. Bob is a regular member,
+    not the master; transferring his seat to dave shouldn't fabricate a
+    role-grant event."""
+    from khimaira.monitor import sessions as sessions_mod
+
+    c = isolated_chats
+    _make_session(sessions_mod, "alice-uuid", "alice")
+    _make_session(sessions_mod, "bob-uuid", "bob")
+    c.create_room("alice-uuid", ["bob-uuid"], title="t")
+    chat_id = c.my_chats("alice-uuid")[0]["chat_id"]
+    c.accept(chat_id, "bob-uuid")
+
+    # Bob (non-creator) transfers his seat to dave.
+    _make_session(sessions_mod, "dave-uuid", "dave")
+    pre_count = len(_directives(c, chat_id))
+    c.transfer_membership(chat_id, "bob-uuid", "dave-uuid")
+    assert len(_directives(c, chat_id)) == pre_count, (
+        "non-master transfer must NOT emit a role directive"
+    )

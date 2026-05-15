@@ -70,6 +70,18 @@ ROLE_OBSERVER = "observer"
 ROLE_CRITIC = "critic"
 _VALID_ROLES: frozenset[str] = frozenset({ROLE_MASTER, ROLE_AGENT, ROLE_OBSERVER, ROLE_CRITIC})
 
+# Phase B v1.5: recommended model + effort budget per role.
+# Used by `_emit_role_directive` to surface slash-command suggestions to the
+# target session at role-change points (chat_create_room, chat_grant_role,
+# chat_set_creator, chat_transfer_membership). Critic is intentionally absent
+# — no default; orchestrator picks per scope, and the directive emit is a
+# silent no-op when the role has no entry here.
+ROLE_BUDGET: dict[str, dict[str, str]] = {
+    ROLE_MASTER: {"model": "opus", "effort": "max"},
+    ROLE_AGENT: {"model": "sonnet", "effort": "medium"},
+    ROLE_OBSERVER: {"model": "haiku", "effort": "low"},
+}
+
 # (from_status, to_status) → roles allowed to perform the transition.
 # "master" = chat creator; "assignee_or_any" = assignee if set, else any accepted member.
 _TASK_TRANSITIONS: dict[tuple[str, str], set[str]] = {
@@ -120,6 +132,70 @@ def _append(chat_id: str, record: dict[str, Any]) -> None:
 
 def _read(chat_id: str) -> list[dict[str, Any]]:
     return sessions_mod._read_jsonl(_chat_path(chat_id))
+
+
+def _emit_role_directive(
+    chat_id: str,
+    target_session_id: str,
+    role: str,
+    *,
+    ts: str | None = None,
+) -> None:
+    """Phase B v1.5: append a role-grant directive as a system msg.
+
+    Fires at role-change points (chat_create_room, chat_grant_role,
+    chat_set_creator, chat_transfer_membership) to tell the target
+    session their role changed and which `/model` + `/effort` slash
+    commands to type. Targeted via `to=[target_session_id]` so SSE only
+    pushes to the recipient — sibling agents see the role change via
+    member_roles META, not via the slash-command guidance.
+
+    **Silent-skip when role is not in ROLE_BUDGET** (currently just
+    `critic`). The directive's purpose is slash-command guidance; for
+    roles without a default, there's nothing to recommend, and the
+    role-change is still visible via member_roles META. No-op return.
+
+    `ts`: optional override so multi-emit calls (e.g. master-swap in
+    chat_grant_role) can group two directives under the same timestamp
+    for audit-pairing. Omit to let each emit stamp itself.
+
+    Fire-and-forget; caller doesn't use the return value (None).
+    """
+    budget = ROLE_BUDGET.get(role)
+    if budget is None:
+        return  # no default for this role; silent skip
+    body = (
+        f"🎚️ Role updated: you are now {role}. "
+        f"Recommended budget: /model {budget['model']}, /effort {budget['effort']}. "
+        f"Type those in this window to match. "
+        f"See docs/khimaira-chat.md#token-cost-budgeting."
+    )
+    record = {
+        "kind": MSG,
+        "event_id": _new_event_id(),
+        "id": "msg-" + uuid.uuid4().hex[:12],
+        "ts": ts or _now_iso(),
+        "chat_id": chat_id,
+        "sender_id": SYSTEM_SENDER_ID,
+        "sender_name": SYSTEM_SENDER_ID,
+        "body": body,
+        "to": [target_session_id],
+        "meta": {
+            "event_type": "role_directive",
+            "role": role,
+            "target": target_session_id,
+            "model": budget["model"],
+            "effort": budget["effort"],
+        },
+    }
+    _append(chat_id, record)
+    log.info(
+        "chats: role_directive chat=%s target=%s role=%s budget=%s",
+        chat_id,
+        target_session_id,
+        role,
+        budget,
+    )
 
 
 def _is_master(room: dict[str, Any], sid: str) -> bool:
@@ -300,6 +376,11 @@ def create_room(
             "invited_by": creator_session_id,
         }
         _append(chat_id, record)
+
+    # Phase B v1.5: emit role-grant directive to the creator. They hold
+    # implicit master role (via room.meta.created_by / _is_master fallback);
+    # the directive surfaces the recommended /model + /effort slash commands.
+    _emit_role_directive(chat_id, creator_session_id, ROLE_MASTER)
 
     log.info("chats: created %s with %d members", chat_id, len(resolved_members))
     return load_room(chat_id)
@@ -1053,6 +1134,14 @@ def transfer_membership(
     _append(chat_id, out_record)
     _append(chat_id, in_record)
     _append(chat_id, sys_msg)
+    # Phase B v1.5: if this transfer was a master-swap (creator handoff), the
+    # receiving session inherits the master role. Emit a role directive to
+    # them so they know to switch their `/model` + `/effort` to the master-tier
+    # budget. Donor session becomes TRANSFERRED_OUT — they're departing, no
+    # directive needed. Non-creator transfers leave roles untouched, so no
+    # directive fires in that branch.
+    if creator_meta_update is not None:
+        _emit_role_directive(chat_id, to_session_id, ROLE_MASTER, ts=ts)
     log.info(
         "chats: transfer chat=%s from=%s to=%s transfer_id=%s%s",
         chat_id,
@@ -1122,6 +1211,12 @@ def set_creator(chat_id: str, new_creator_session_id: str) -> dict[str, Any]:
     member_roles[new_creator_session_id] = "master"
     new_meta["member_roles"] = member_roles
     _append(chat_id, new_meta)
+    # Phase B v1.5: new creator inherits master role unconditionally on
+    # set_creator — emit directive so they know to switch their `/model` +
+    # `/effort` to master-tier budget. set_creator is only callable on
+    # orphaned chats (current creator TRANSFERRED_OUT), so the new creator
+    # is unambiguously becoming master; no gate needed.
+    _emit_role_directive(chat_id, new_creator_session_id, ROLE_MASTER)
     log.info(
         "chats: set_creator %s for orphaned chat %s (was %s)",
         new_creator_session_id,
@@ -1205,6 +1300,7 @@ def chat_grant_role(
     # Atomic promote-demote when promoting a new master. Find the current
     # master (after materialization, this comes from member_roles); demote
     # them unless they're the same as the target (no-op promotion).
+    demoted_master_sid: str | None = None
     if role == ROLE_MASTER:
         current_master = None
         for sid, r in member_roles.items():
@@ -1213,18 +1309,31 @@ def chat_grant_role(
                 break
         if current_master and current_master != target_session_id:
             member_roles[current_master] = demote_to
+            demoted_master_sid = current_master
 
     # Apply the requested grant.
     member_roles[target_session_id] = role
 
+    ts = _now_iso()
     new_meta = {
         **existing_meta,
         "kind": META,
         "event_id": _new_event_id(),
-        "ts": _now_iso(),
+        "ts": ts,
         "member_roles": member_roles,
     }
     _append(chat_id, new_meta)
+
+    # Phase B v1.5: emit role-grant directives. Target always gets one
+    # (silent-skipped only if the new role has no ROLE_BUDGET default —
+    # currently just `critic`). On master-swap, the demoted prior master
+    # also gets a directive announcing their new (lower) role's budget.
+    # Both directives share the META write's timestamp so audit-trail
+    # pairing reads cleanly.
+    _emit_role_directive(chat_id, target_session_id, role, ts=ts)
+    if demoted_master_sid is not None:
+        _emit_role_directive(chat_id, demoted_master_sid, demote_to, ts=ts)
+
     log.info(
         "chats: grant_role chat=%s target=%s role=%s by=%s%s",
         chat_id,

@@ -122,8 +122,11 @@ def test_accept_then_send_then_history(chats_api_client):
     history = client.get(f"/api/chats/{chat_id}/messages?session_id=bob")
     assert history.status_code == 200
     msgs = history.json()["messages"]
-    assert len(msgs) == 1
-    assert msgs[0]["body"] == "hello"
+    # Phase B v1.5: filter system role-directive (sent on chat_create_room
+    # to the creator) to assert on user messages only.
+    user_msgs = [m for m in msgs if m.get("sender_id") != "khimaira-system"]
+    assert len(user_msgs) == 1
+    assert user_msgs[0]["body"] == "hello"
 
 
 def test_send_by_pending_member_returns_403(chats_api_client):

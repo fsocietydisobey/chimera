@@ -690,17 +690,43 @@ The role labels match the `member_roles` enum values from Phase B v2 exactly (`m
 
 ### How it composes with member_roles
 
-This is convention, not enforcement. `member_roles` (Phase B v2) is the canonical role key but carries no budget hint — agent processes pick their model and thinking-mode at session start, before they know what role they'll hold in a given chat. The convention lives in the orchestrator's setup: when spinning up a worker session, pick its budget from the role you intend to grant it.
+This is convention reinforced by a just-in-time recommendation primitive, not enforcement. `member_roles` (Phase B v2) is the canonical role key but carries no budget hint — agent processes pick their model and thinking-mode at session start, before they know what role they'll hold in a given chat. The convention lives in the orchestrator's setup: when spinning up a worker session, pick its budget from the role you intend to grant it.
 
-Future versions could lift this to a code-enforced `recommended_budget` hint on `chat_task_create` or `chat_grant_role`, letting the daemon signal budget alongside role. Not designed yet — v1.4 is convention-only, and the lift only makes sense if a forcing function appears (e.g., usage data shows the convention isn't enough on its own).
+Phase B v1.5 added an automated directive emit at every role-change point (see [Role-grant directive](#role-grant-directive) below). The directive is a recommendation, not a switch — agents see a channel block with the suggested `/model` and `/effort` slash commands and the user types them. We verified empirically that Claude Code today exposes no programmatic surface to swap model or effort mid-session (filed as [anthropics/claude-code#59502](https://github.com/anthropics/claude-code/issues/59502)); until/unless that primitive exists, the directive is the closest the protocol can come to seamless role-budget routing.
+
+Future versions could lift this to a fully-programmatic switch — either via a code-enforced `recommended_budget` hint on `chat_task_create` / `chat_grant_role` paired with a Claude Code-side surface that applies it, or via a `claude/channel` message kind that runs slash commands on the receiving session. Not designed yet; awaits an Anthropic primitive that closes the application gap (see [`PHASE-B-V2-ROLES-AUDIT.md`](../tasks/khimaira-chat/PHASE-B-V2-ROLES-AUDIT.md) for the gap-typology framing).
 
 ### Surfaces wiring
 
-Three places carry the convention forward without code changes:
+Four places carry the convention forward:
 
-- **`/khimaira-orchestrate` kickoff brief** surfaces a one-line summary plus a pointer to this section in the templated brief, so peers know their lane's recommended budget at the moment they accept the invite.
-- **`/khimaira-transfer-session` handoff body** captures the donor's actual model + thinking-mode and propagates it to the recipient, who inherits master role by default and matches (or deliberately diverges from) the donor's budget.
-- This section is the canonical reference both link back to.
+- **`/khimaira-orchestrate` kickoff brief** (convention, Phase B v1.4) — surfaces a one-line summary plus a pointer to this section in the templated brief, so peers know their lane's recommended budget at the moment they accept the invite.
+- **`/khimaira-transfer-session` handoff body** (convention, Phase B v1.4) — captures the donor's actual model + thinking-mode and propagates it to the recipient, who inherits master role by default and matches (or deliberately diverges from) the donor's budget.
+- **Channel-block role directive** (just-in-time recommendation, Phase B v1.5) — see [Role-grant directive](#role-grant-directive) below. Fires automatically at every role-change point; recipient applies via user-typed `/model` and `/effort`.
+- This section is the canonical reference all three surfaces link back to.
+
+### Role-grant directive
+
+*Added Phase B v1.5 — bridges the gap between convention and what would be a fully-programmatic switch if one were available.*
+
+When any role-affecting primitive fires (`chat_create_room`, `chat_grant_role`, `chat_set_creator`, or a `chat_transfer_membership` master-swap), the daemon emits a system message into the chat's JSONL targeted to the role recipient via the `to=[target_session_id]` field. The body carries the recommended slash commands ready to copy:
+
+```
+🎚️ Role updated: you are now master. Recommended budget: /model opus, /effort max.
+Type those in this window to match. See docs/khimaira-chat.md#token-cost-budgeting.
+```
+
+**Targeted, not broadcast.** The `to=[recipient]` field routes the SSE push to the recipient only; sibling agents see the role change via the `member_roles` META mutation, not via the slash-command directive. Avoids spamming peers with guidance they wouldn't apply.
+
+**Silent skip for `critic`.** Critic has no default budget in the recommendation table (deliberately — critics scope-shift across a wide range from spot-check to full audit), so the directive helper short-circuits before emitting. The role assignment is still durably visible via the `member_roles` META update; the directive is purely the slash-command-suggestion surface.
+
+**Atomic promote-demote emits two directives.** When `chat_grant_role(target, "master")` lifts a target to master while demoting the prior master, both targets receive directives (new master gets master-tier budget; demoted prior master gets the `demote_to` role's budget — defaults to `agent`). The two emit calls share a timestamp so the audit log pairs them.
+
+**User-typed application is load-bearing for now.** The directive is a recommendation, not a state change on the recipient. The recipient (a Claude Code session) sees the channel block in their next user-prompt context; the user reads it and types the `/model` and `/effort` commands themselves. We verified empirically that there is no programmatic Claude Code surface today — slash commands injected via `UserPromptSubmit` hook output land as context text, not parsed commands; `settings.json` is read at session start only; no MCP / env-var / SDK switch exists. Filed as [anthropics/claude-code#59502](https://github.com/anthropics/claude-code/issues/59502).
+
+**Audit-visible.** The directive lands as a normal `kind=msg` system record in the chat's JSONL with `meta.event_type="role_directive"` and `meta.role` / `meta.model` / `meta.effort` fields. Future audit views can filter on `meta.event_type` to surface "every role change in this chat, in order."
+
+**Caller-side, no helper imports.** The `_emit_role_directive` helper is module-private in `packages/khimaira/src/khimaira/monitor/chats.py`; only the role-affecting primitives in that module call it. Adding a new role-affecting primitive in a future phase only needs one line — `_emit_role_directive(chat_id, target_sid, role)` — at the right point in the flow.
 
 ### When to deviate
 
