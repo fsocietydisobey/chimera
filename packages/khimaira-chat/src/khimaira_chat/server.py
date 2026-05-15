@@ -191,9 +191,7 @@ async def _emit_channel_notification(session: Any, content: str, meta: dict[str,
 # ---------------------------------------------------------------------------
 
 
-def _route_record(
-    record: dict[str, Any], my_session_id: str
-) -> tuple[str, dict[str, str]] | None:
+def _route_record(record: dict[str, Any], my_session_id: str) -> tuple[str, dict[str, str]] | None:
     """Decide whether this subprocess should emit a channel notification
     for an incoming SSE record, and if so, the (content, meta) to send.
 
