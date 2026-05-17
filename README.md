@@ -74,17 +74,33 @@ one command to wire them all up.
 
 ### Topology
 
-```
-Joseph → [intake-1]              ← you talk here (sonnet/medium)
-              │  🎯 INTAKE HANDOFF (private DM)
-              ▼
-          [master]                ← orchestrator (sonnet/medium)
-              │  /khimaira-assign    /khimaira-consult
-              ├─── [agent-1]         ← executor (sonnet/medium)
-              ├─── [agent-2]         ← executor (sonnet/medium)
-              ├─── [observer-1]      ← auditor (haiku/default)
-              ├─── [architect-1]     ← design sidecar (opus/max, on-demand)
-              └─── [critic ad-hoc]   ← challenger (orchestrator picks budget)
+```mermaid
+flowchart TD
+    Joseph(["👤 Joseph"])
+    intake["intake-1\nsonnet / medium"]
+    master["master\nsonnet / medium"]
+    agent1["agent-1\nsonnet / medium"]
+    agent2["agent-2\nsonnet / medium"]
+    observer["observer-1\nhaiku / default"]
+    architect["architect-1\nopus / max"]
+    critic["critic\nad-hoc"]
+
+    Joseph -->|request| intake
+    intake -->|"🎯 INTAKE HANDOFF\n(private DM)"| master
+    master -->|"/khimaira-assign"| agent1
+    master -->|"/khimaira-assign"| agent2
+    master -->|monitors| observer
+    master -->|"/khimaira-consult"| architect
+    master -.->|"summoned\nfor review"| critic
+
+    style Joseph fill:#f0f0f0
+    style intake fill:#dbeafe
+    style master fill:#dbeafe
+    style agent1 fill:#d1fae5
+    style agent2 fill:#d1fae5
+    style observer fill:#fef9c3
+    style architect fill:#fce7f3
+    style critic fill:#fee2e2
 ```
 
 ### Role taxonomy
@@ -179,6 +195,47 @@ recommendation → risks. Costs nothing between consults.
 Agents report `done` via `chat_task_update`. The `📋 channel event —
 master review required` block surfaces in master's next turn. Master
 reviews and approves or sends back with specific feedback.
+
+### Task lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending : chat_task_create
+    pending --> in_progress : agent (after /agent-ready)
+    pending --> cancelled : master
+    in_progress --> done : agent
+    in_progress --> cancelled : master
+    done --> approved : master
+    done --> changes_requested : master
+    changes_requested --> in_progress : agent
+    approved --> [*]
+    cancelled --> [*]
+```
+
+### Sequence: master assigns, agent executes
+
+```mermaid
+sequenceDiagram
+    participant M as master
+    participant A as agent-1
+    participant B as agent-2
+    Note over M,B: /khimaira-assign — one daemon round-trip
+    M->>A: task assigned [enforcement gate active]
+    M->>B: task assigned [enforcement gate active]
+    A-->>M: /agent-ready (budget verified)
+    B-->>M: /agent-ready (budget verified)
+    M->>A: 🟢 begin
+    M->>B: 🟢 begin
+    par parallel work
+        A-->>M: task done
+    and
+        B-->>M: task done
+    end
+    M->>A: approved
+    M->>B: changes_requested
+    B-->>M: task done (revised)
+    M->>B: approved
+```
 
 ### Persistent context blocks
 
@@ -324,6 +381,24 @@ and future sessions can pick up where stopped ones left off.
 | Leave a directive for whoever opens this project next | `session_post_handoff(text=..., scope_cwd=...)` |
 | Read what a stopped session discussed | `session_query_transcript(session_id, query="X")` |
 | Delegate a handoff slice to a specific session | `session_invite_handoff(parent_id, owner, invitee, text)` |
+
+```mermaid
+flowchart LR
+    CCA["Claude Code A\nsession 1b41…"]
+    CCB["Claude Code B\nsession 5644…"]
+    SubA["khimaira-chat\nsubprocess A"]
+    SubB["khimaira-chat\nsubprocess B"]
+    Daemon["khimaira-monitor\n/api/chats/*\nJSONL state\nevent fan-out"]
+
+    CCA <-->|stdio| SubA
+    CCB <-->|stdio| SubB
+    SubA <-->|HTTP / SSE| Daemon
+    SubB <-->|HTTP / SSE| Daemon
+
+    style Daemon fill:#e8f4f8
+    style SubA fill:#fff5e6
+    style SubB fill:#fff5e6
+```
 
 Two hooks install via `khimaira install-hooks`:
 
