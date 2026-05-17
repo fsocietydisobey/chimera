@@ -33,6 +33,7 @@ _STATE_ROOT = (
 )
 _BASE_DIR = _STATE_ROOT / "sessions"
 _HANDOFFS_PATH = _STATE_ROOT / "handoffs.jsonl"
+_ROLES_DIR = Path(__file__).parent.parent / "roles"
 
 # Daemon HTTP base. Hook prefers HTTP (single source of truth = the
 # daemon's code) and only falls back to file-direct ops when the daemon
@@ -838,6 +839,15 @@ def main() -> int:
     if tasks:
         blocks.append(_format_tasks(tasks))
     if chat_roles:
+        primary_role = chat_roles[0].get("role")
+        if primary_role:
+            role_path = _ROLES_DIR / f"{primary_role}.md"
+            if role_path.exists():
+                try:
+                    role_contents = role_path.read_text(encoding="utf-8")
+                    blocks.append(f"📖 ROLE FILE — {primary_role}\n{role_contents}")
+                except OSError:
+                    pass
         blocks.append(_format_chat_roles(chat_roles))
     if others:
         blocks.append(_format_active_sessions(others))

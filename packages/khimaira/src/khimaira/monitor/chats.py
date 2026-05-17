@@ -88,6 +88,16 @@ ROLE_BUDGET: dict[str, dict[str, str]] = {
     ROLE_INTAKE: {"model": "sonnet", "effort": "medium"},  # user-facing front-end
 }
 
+
+def infer_role_from_name(session_name: str) -> str | None:
+    """Return the role prefix from a session name, or None if not a known role.
+
+    "agent-1" → "agent", "observer-2" → "observer", "khimaira-0" → None
+    """
+    prefix = session_name.split("-")[0]
+    return prefix if prefix in ROLE_BUDGET else None
+
+
 # (from_status, to_status) → roles allowed to perform the transition.
 # "master" = chat creator; "assignee_or_any" = assignee if set, else any accepted member.
 _TASK_TRANSITIONS: dict[tuple[str, str], set[str]] = {
@@ -334,6 +344,7 @@ def create_room(
     title: str | None = None,
     fresh: bool = False,
     topology: str = "flat",
+    member_roles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Create a new chat room. Creator is auto-`accepted`; other members
     start `pending` and must call `accept()` to receive notifications.
@@ -366,7 +377,7 @@ def create_room(
     member_names = [_resolve_session_name(m) or m[:8] for m in resolved_members]
     derived_title = title or " + ".join(member_names)
 
-    meta = {
+    meta: dict[str, Any] = {
         "kind": META,
         "event_id": _new_event_id(),
         "chat_id": chat_id,
@@ -378,6 +389,8 @@ def create_room(
         "fresh_suffix": fresh_suffix,
         "topology": topology,
     }
+    if member_roles is not None:
+        meta["member_roles"] = member_roles
     _append(chat_id, meta)
 
     # Creator auto-accepted; others either auto-accepted (allowlist) or pending.

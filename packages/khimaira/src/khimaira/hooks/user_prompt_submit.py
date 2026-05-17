@@ -514,6 +514,129 @@ def _format_pending_assignments(assignments: list[dict]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _discover_unfired_acks(session_id: str) -> list[dict]:
+    """Walk ~/.local/state/khimaira/chats/*.jsonl and return tasks created BY
+    this session that haven't been acked yet (no in_progress or later update).
+
+    Finds kind=task records where sender_id == session_id, then checks for
+    any task_update that moves the task beyond pending. Returns only those
+    still in pending state with no ack fired.
+
+    Returns list of dicts sorted newest-first:
+        {task_id, chat_id, assignee_name, body_snippet, created_ts}
+
+    Errors are silent — hook must never break.
+    """
+    state_root = (
+        Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))) / "khimaira"
+    )
+    chats_dir = state_root / "chats"
+    if not chats_dir.exists():
+        return []
+
+    results: list[dict] = []
+
+    for path in sorted(chats_dir.glob("*.jsonl")):
+        try:
+            records: list[dict] = []
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for raw_line in f:
+                        raw_line = raw_line.strip()
+                        if not raw_line:
+                            continue
+                        try:
+                            records.append(json.loads(raw_line))
+                        except json.JSONDecodeError:
+                            continue
+            except OSError:
+                continue
+
+            if not records:
+                continue
+
+            chat_id = path.stem
+            for r in reversed(records):
+                if r.get("kind") == "meta":
+                    chat_id = r.get("chat_id") or path.stem
+                    break
+
+            # Collect tasks sent by this session and track their latest statuses.
+            tasks_by_id: dict[str, dict] = {}
+            task_statuses: dict[str, str] = {}
+
+            for r in records:
+                k = r.get("kind")
+                if k == "task":
+                    tid = r.get("id")
+                    if tid and r.get("sender_id") == session_id:
+                        tasks_by_id[tid] = r
+                        task_statuses.setdefault(tid, r.get("status") or "pending")
+                elif k == "task_update":
+                    tid = r.get("task_id")
+                    if tid and r.get("status"):
+                        task_statuses[tid] = r["status"]
+
+            for tid, task_rec in tasks_by_id.items():
+                if task_statuses.get(tid, "pending") != "pending":
+                    continue
+                body = (task_rec.get("body") or "").strip()
+                results.append(
+                    {
+                        "task_id": tid,
+                        "chat_id": chat_id,
+                        "assignee_name": task_rec.get("assignee_name") or "?",
+                        "body_snippet": body[:60],
+                        "created_ts": task_rec.get("ts") or "",
+                    }
+                )
+        except Exception:  # noqa: BLE001 — hook must never break
+            continue
+
+    results.sort(key=lambda x: x.get("created_ts") or "", reverse=True)
+    return results
+
+
+def _format_unfired_acks(tasks: list[dict]) -> str:
+    """Render tasks awaiting agent ack as a master-facing context block.
+
+    Returns "" when tasks is empty so the caller can test truthiness.
+    """
+    if not tasks:
+        return ""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    lines = [f"📊 ASSIGNMENTS AWAITING ACK — {len(tasks)} agent(s) haven't started yet"]
+    for t in tasks:
+        assignee = t.get("assignee_name") or "?"
+        tid = t.get("task_id") or "?"
+        snippet = t.get("body_snippet") or ""
+        created_ts = t.get("created_ts") or ""
+        age_str = ""
+        if created_ts:
+            try:
+                ts = created_ts
+                if ts.endswith("Z"):
+                    ts = ts[:-1] + "+00:00"
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age_secs = int((now - dt).total_seconds())
+                if age_secs < 60:
+                    age_str = f"{age_secs}s ago"
+                elif age_secs < 3600:
+                    age_str = f"{age_secs // 60}m ago"
+                else:
+                    age_str = f"{age_secs // 3600}h ago"
+            except (ValueError, TypeError):
+                pass
+        age_part = f" (assigned {age_str})" if age_str else ""
+        ellipsis = "..." if len(snippet) == 60 else ""
+        lines.append(f'  • {assignee} [{tid}]: "{snippet}{ellipsis}"{age_part}')
+    return "\n".join(lines)
+
+
 def _check_stale_acks(session_id: str) -> list[dict]:
     """Detect acked /khimaira-assign tasks whose budget has become stale.
 
@@ -847,6 +970,20 @@ def main() -> int:
         except Exception:  # noqa: BLE001 — hook must not break
             pending_assignments_block = ""
 
+    # --- v1.9.6: inverse banner — assignments awaiting agent ack ----------
+    # Master-facing counterpart to the agent's pending-assignments banner.
+    # Surfaces tasks created BY this session that have no in_progress update
+    # yet — so master knows which agents haven't started. Silent when this
+    # session created no tasks (non-master sessions). Opt-out: KHIMAIRA_UNFIRED_ACK_BANNER=0.
+    unfired_acks_block = ""
+    if os.environ.get("KHIMAIRA_UNFIRED_ACK_BANNER") not in ("0", "false", "no"):
+        try:
+            _unfired = _discover_unfired_acks(session_id)
+            if _unfired:
+                unfired_acks_block = _format_unfired_acks(_unfired)
+        except Exception:  # noqa: BLE001 — hook must not break
+            unfired_acks_block = ""
+
     # --- Phase B v1.8.1: stale-ack detection ------------------------------
     # `/model` is per-session runtime state (not persisted in settings.json),
     # so after a restart a previously-acked assignment can have stale
@@ -944,6 +1081,7 @@ def main() -> int:
         and not bottleneck_block
         and not role_budget_block
         and not pending_assignments_block
+        and not unfired_acks_block
         and not stale_acks_block
         and not quiet_channel_block
     ):
@@ -951,14 +1089,15 @@ def main() -> int:
 
     # Ordering: quiet_channel (highest — fires on auto-triggered turns, short-
     # circuits verbose response before other blocks even render) → bottleneck →
-    # pending_assignments → stale_acks → role_budget → delegate → inbox →
-    # incoming questions → periodic reminder.
+    # pending_assignments → unfired_acks → stale_acks → role_budget → delegate →
+    # inbox → incoming questions → periodic reminder.
     additional_context = "\n\n".join(
         b
         for b in (
             quiet_channel_block,
             bottleneck_block,
             pending_assignments_block,
+            unfired_acks_block,
             stale_acks_block,
             role_budget_block,
             delegate_block,

@@ -2647,3 +2647,38 @@ def test_private_task_hidden_from_non_assignee_in_task_status(isolated_chats):
     # Master (audit) sees it
     master_tasks = c.task_status(chat_id, master_id)
     assert any(t["body"] == "private task body" for t in master_tasks)
+
+
+# ---------------------------------------------------------------------------
+# infer_role_from_name + member_roles on create_room
+# ---------------------------------------------------------------------------
+
+
+def test_infer_role_from_name_agent(isolated_chats):
+    assert isolated_chats.infer_role_from_name("agent-1") == "agent"
+
+
+def test_infer_role_from_name_unknown(isolated_chats):
+    assert isolated_chats.infer_role_from_name("khimaira-0") is None
+
+
+def test_create_room_member_roles_stored(isolated_chats, tmp_path, monkeypatch):
+    import importlib
+    from khimaira.monitor import sessions as sessions_mod
+
+    master_id = "aaaaaaaa-0000-0000-0000-000000000001"
+    agent_id = "bbbbbbbb-0000-0000-0000-000000000002"
+
+    roles = {master_id: "master", agent_id: "agent"}
+    room = isolated_chats.create_room(
+        master_id,
+        [agent_id],
+        title="test room",
+        topology="hierarchical",
+        member_roles=roles,
+    )
+    assert room["meta"]["member_roles"] == roles
+
+    # Verify round-trip: load_room returns the stored roles
+    reloaded = isolated_chats.load_room(room["meta"]["chat_id"])
+    assert reloaded["meta"]["member_roles"] == roles
