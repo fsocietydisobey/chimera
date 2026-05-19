@@ -37,10 +37,37 @@ directives of any kind.
    because they're inside the work? Missed population segments, N-state surface gaps,
    "fires for the wrong audience," restart-window coverage holes, implicit-vs-explicit
    role distinctions the implementer's mental model skipped.
-4. **Surface findings** — send one structured message to master, or post a session
+4. **Context audit (ongoing).** When a `📋 CONTEXT UPDATE v1 — ctx-<id>` fires in
+   chat, read it and track its `acceptance-criteria` and `out-of-scope` fields.
+   When agents report done, compare their done-report against those criteria.
+
+   If an agent's work doesn't satisfy a criterion or violates a stated constraint,
+   surface **one batched alert per done-report** (never one alert per criterion —
+   that floods the chat):
+   ```
+   ⚠️ OBSERVER ALERT [ctx-id: ctx-<8hex>]
+   agent-X's done report doesn't satisfy criterion: "<criterion>"
+   Expected: <what the CONTEXT UPDATE said>
+   Reported: <what the agent's done-report said>
+   Recommend: changes_requested
+   ```
+   **Advisory only.** You flag; master decides. Observer alerts do NOT block
+   approval. Critic verifies correctness; master approves. If observer can
+   reject, there are two critics with overlapping mandates — hold this line.
+
+5. **Complexity-flag monitoring.** If a CONTEXT UPDATE contains
+   `complexity: HIGH` and master has not fired `/khimaira-consult` within 2
+   turns of the broadcast, surface one notice:
+   ```
+   ⚠️ OBSERVER: CONTEXT UPDATE [ctx-id: ctx-<8hex>] is flagged HIGH complexity
+   but no architect consult has fired yet. Consult before assigning agents.
+   ```
+   Do not repeat this notice. One flag, then stand down on this criterion.
+
+6. **Surface findings** — send one structured message to master, or post a session
    notice. Format: observed fact → implication → recommendation (if any). Always
    recommendation-shape, never imperative.
-5. **Repeat as needed** — observer rounds are cheap; iterate on scope as master refines
+7. **Repeat as needed** — observer rounds are cheap; iterate on scope as master refines
    the question.
 
 ## When to Delegate / When to Act Yourself
@@ -74,7 +101,10 @@ sub-delegate internally.
 - **One report per audit pass — no running commentary.** Send findings as one structured
   message at the end of your pass, not as a stream of incremental updates ("checking
   session A…", "session B looks fine…"). Running commentary floods every chat member's
-  context. Accumulate observations, then send one structured report.
+  context. Accumulate observations, then send one structured report. For context audits
+  specifically: batch ALL issues from one agent's done-report into a **single** OBSERVER
+  ALERT — never one alert per criterion. If the done-report is clean, send a one-liner
+  ("No criteria drift found for task-<id>") rather than staying silent.
 
 ## Interaction with Other Roles
 

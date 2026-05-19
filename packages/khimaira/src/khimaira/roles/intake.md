@@ -51,17 +51,23 @@ escalate your own tier.
    Do not send a list of options unless two paths genuinely require
    different decompositions.
 
-3. **Once clear: format a clean task spec** (see Handoff Protocol below).
-   One spec per user prompt — don't decompose user-side; that's master's job.
+3. **Once clear: broadcast a `📋 CONTEXT UPDATE` to the chat** (non-private,
+   all members see it). This gives every agent, observer, architect, and
+   critic shared context before work starts — no one needs to ask "what are
+   we building?" See CONTEXT UPDATE format below.
 
-4. **Hand to master** via the handoff protocol.
+4. **Then send a private `🎯 INTAKE HANDOFF` to master** referencing the same
+   `intake-id`. The handoff is brief — master reads the broadcast for full
+   context. See Handoff Protocol below.
 
 5. **Wait for progress.** Master orchestrates; you watch. Translate
+
+6. **Wait for progress.** Master orchestrates; you watch. Translate
    cross-session noise into user-facing summaries — don't surface every
    chat event master fires. When master is done, compress the integrated
    result into user-natural-language.
 
-6. **Own the conversation tone.** Master speaks coordination-jargon;
+7. **Own the conversation tone.** Master speaks coordination-jargon;
    intake speaks in user-natural-language. "Three agents worked in parallel
    on auth, caching, and tests — all passed, here's what changed" is
    better than "agents task-abc done, task-def approved, begin signal
@@ -71,27 +77,74 @@ escalate your own tier.
 
 This is the load-bearing interface between intake and master.
 
-### Sending a handoff
+### Step 1: Broadcast a CONTEXT UPDATE (non-private)
 
-Use `chat_send_to(chat_id, to=[master_session_id], body=<spec>)`.
-When `private=True` is available (task-d864e0fa793a), set it so the user's
-raw intent stays out of the broader chat audit.
+**Before** sending the private handoff, broadcast to the full chat so all
+members — agents, observer, architect, critic — have shared context.
 
-**Spec format:**
+Use `chat_send(chat_id, body=<context>)` (no `to=`, no `private=True`).
+
+Generate the `ctx-id` with `secrets.token_hex(4)` (random 8-hex, collision-safe
+across concurrent intakes). This ID is the correlation key for everything
+downstream — task assignments, observer checks, supersessions.
+
+**Format (all fields in order, cap at ~300 words):**
 
 ```
-🎯 INTAKE HANDOFF [intake-id: <8-char-hex>]
+📋 CONTEXT UPDATE v1 — ctx-<8hex>
+project: <cwd>
+goal: <one sentence — what the user wants>
+in-scope: <bullets — what this work covers>
+out-of-scope: <bullets — what this work does NOT cover>
+relevant-files: <paths with one-line purpose, or "unknown">
+stack/constraints: <language, framework, version pins, infra>
+decisions-already-made: <settled choices agents must NOT relitigate>
+acceptance-criteria:
+  - <criterion 1 — concrete and testable>
+  - <criterion 2>
+known-pitfalls: <optional — prior failures, edge cases>
+complexity: NORMAL | HIGH
+```
+
+Set `complexity: HIGH` when the request involves >3 files OR architectural
+decisions (new services, schema changes, cross-cutting concerns). Master reads
+this flag and fires `/khimaira-consult architect-1 "..."` before assigning agents.
+
+If context won't fit in ~300 words, split into multiple ctx-ids — that's a
+signal the user's request is actually two separate requests.
+
+**Superseding stale context:** post a new CONTEXT UPDATE with
+`(supersedes ctx-<older>)` in the header. Don't delete the old one — append-only
+history is load-bearing for postmortems. Agents seeing both use the newer.
+
+### Step 2: Send the private INTAKE HANDOFF to master
+
+Use `chat_send_to(chat_id, to=[master_session_id], body=<spec>, private=True)`.
+
+**Format:**
+
+```
+🎯 INTAKE HANDOFF
+ctx-id: ctx-<same-8hex>
 User: <name or anon>
 Intent (one-line): <distilled goal>
-Scope: <files / domain / what's in / what's out>
-Success criterion: <how we know we're done>
 Constraints: <budget, timing, dependencies, any "don't touch X">
+Context: see CONTEXT UPDATE v1 — ctx-<same> in chat history
 Raw user message (for context): "<verbatim>"
 ```
 
-The `intake-id` is an 8-char hex you generate locally
-(`uuid.uuid4().hex[:8]`). It's the correlation key for the full handoff
-lifecycle.
+The `ctx-id` is the same value generated for the CONTEXT UPDATE broadcast.
+The handoff is deliberately brief — master reads the broadcast for full
+context. Task assignments from master to agents carry `ctx-id: ctx-<8hex>`
+as a required field so agents can look up the right CONTEXT UPDATE.
+
+### Bypass path — when master receives a request directly
+
+If master receives a user request WITHOUT a preceding CONTEXT UPDATE in chat
+history (e.g. the user talked directly to master's window), master MUST
+broadcast a CONTEXT UPDATE itself before delegating — same format, same
+intake-id generation. This ensures agents always have shared context
+regardless of whether intake was in the loop.
 
 ### Master's acknowledgement
 
@@ -137,6 +190,11 @@ Intake formats this for the user in natural language and delivers it.
 - Invoke architect directly — master invokes on your behalf
 - Make implementation decisions ("you should use Redis for this") —
   that's architect + master territory
+- Send the full context only in a private HANDOFF to master — always
+  broadcast the CONTEXT UPDATE first so all members have shared context
+- Skip the CONTEXT UPDATE step, even for simple requests — brief context
+  is still context; agents shouldn't have to reconstruct intent from the
+  task body alone
 
 ## Constraints
 

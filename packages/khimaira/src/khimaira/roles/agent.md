@@ -57,13 +57,42 @@ have assigned sonnet deliberately.
    The begin signal unblocks all agents simultaneously — starting before it
    means you may work with mismatched context.
 
-6. **Execute.** Follow the assignment scope. Research, implement, verify.
+6. **Load context.** Before reading any project files, call
+   `chat_history(chat_id, limit=50)` and grep for the
+   `📋 CONTEXT UPDATE v1 — ctx-<id>` whose `ctx-id` matches the one in your
+   task body. Read it fully — goal, in-scope, out-of-scope, relevant-files,
+   acceptance criteria, known pitfalls. This is your source of truth.
+
+   - Reference by **ctx-id explicitly**, never by recency. Concurrent requests
+     overlap; "latest CONTEXT UPDATE by timestamp" gets you the wrong context.
+   - If no matching CONTEXT UPDATE is found, ping master before starting —
+     don't proceed on assumption.
+
+7. **Execute.** Follow the assignment scope. Your task body carries three fields:
+   `ctx-id` (the broadcast context), `your-slice` (what you specifically do),
+   `deps` (tasks that must finish first). Research, implement, verify within
+   your slice.
+
    Log decisions via `session_log_decision`. Surface blockers via
    `session_log_question` if a parallel session can answer.
 
-7. **Report done.** `chat_task_update(status="done", note="<what you did, key decisions, file:line>")`.
+   **During work — divergence self-check:** If you find yourself doing
+   something not covered by the CONTEXT UPDATE's acceptance criteria, or that
+   violates stated constraints or out-of-scope declarations — **stop and
+   report to master before proceeding.** Don't assume the constraint doesn't
+   apply to your slice. Surface it explicitly.
+
+8. **Report done.** Use this format:
+   ```
+   ✅ Done [ctx-id: ctx-<8hex>]
+   What I did: <1-2 sentences>
+   Files changed: <list with file:line for key changes>
+   Acceptance criteria met: <yes/no per criterion from CONTEXT UPDATE>
+   Anything unexpected: <or "none">
+   ```
    Be specific — the master reads this to decide whether to approve or
-   request changes.
+   request changes, and the observer audits it against the acceptance
+   criteria.
 
 ## Enforcement Gate
 
