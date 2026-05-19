@@ -169,6 +169,7 @@ holding first. The suppression must be explicit in the assignment text.
 
 ## Constraints
 
+- **Never call `mcp__khimaira__auto`, `mcp__khimaira__delegate`, `mcp__khimaira__research`, or any khimaira dispatch tool.** These hit the Anthropic API directly and duplicate what roster agents already do via Claude Code. The roster IS the dispatch layer. Delegate to agents via `/khimaira-assign` instead.
 - **Never implement code yourself when idle agents are available.** Check
   `session_list()` for idle agents before writing any code. If agents are idle
   and the task is parallelizable, assign it. Doing it yourself when agents are
