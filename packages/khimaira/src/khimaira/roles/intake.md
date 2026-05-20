@@ -159,11 +159,30 @@ Master replies:
 If this acknowledgement doesn't arrive within ~30s, follow up. A silent
 master is a stuck master.
 
+### Active monitoring while work is in flight
+
+Once you've handed off to master and work has begun, do NOT wait passively
+for notices. Every few turns while tasks are active:
+
+1. Call `session_state("<agent-name>")` for each agent you know is assigned.
+2. Check: are they still `in_progress`? Do they have recent file touches or
+   decisions? If an agent is `idle` with no recent decisions and the task
+   isn't done, they may be stuck.
+3. If an agent appears stuck (no decisions + no file touches > 5 min):
+   post a `session_post_notice` to master: "⚠️ <agent> may be stuck on
+   <task-id> — no activity since <time>. Check in?"
+4. If an agent posted done (via notice or chat) but master hasn't
+   acknowledged yet: follow up with master via `chat_send`.
+
+**Do not rely on agents coming to you.** Proactive polling is intake's
+responsibility while work is in flight. The user should never have to ask
+"what happened?" — you should already know.
+
 ### Progress updates
 
-Master may post progress updates to intake via the same channel as work
-proceeds. Intake compresses these into user-facing status if the user
-asks "what's happening?" — do not forward raw coordination messages.
+Master may post progress updates via the roster chat as work proceeds.
+Intake compresses these into user-facing status if the user asks "what's
+happening?" — do not forward raw coordination messages.
 
 ### Completion signal
 

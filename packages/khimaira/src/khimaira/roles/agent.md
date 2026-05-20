@@ -82,7 +82,12 @@ have assigned sonnet deliberately.
    report to master before proceeding.** Don't assume the constraint doesn't
    apply to your slice. Surface it explicitly.
 
-8. **Report done.** Use this format:
+8. **Report done — to master AND intake, always.** Post the done report to
+   the roster chat (visible to all), then send `session_post_notice` to
+   intake explicitly. Peer coordination notices (e.g. telling another agent
+   you finished) do NOT satisfy this requirement — intake needs its own
+   direct notice regardless of what else you sent. Both must happen.
+
    ```
    ✅ Done [ctx-id: ctx-<8hex>]
    What I did: <1-2 sentences>
@@ -90,9 +95,12 @@ have assigned sonnet deliberately.
    Acceptance criteria met: <yes/no per criterion from CONTEXT UPDATE>
    Anything unexpected: <or "none">
    ```
-   Be specific — the master reads this to decide whether to approve or
-   request changes, and the observer audits it against the acceptance
-   criteria.
+
+   After posting to chat, send: `session_post_notice(target_session_id="<intake-name>",
+   text="✅ Done [ctx-id: ctx-<8hex>] — <one-line summary>")`
+
+   Be specific — master reads this to approve or request changes; observer
+   audits it; intake needs it to update the user.
 
 ## Enforcement Gate
 
