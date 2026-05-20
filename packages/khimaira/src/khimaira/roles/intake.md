@@ -11,6 +11,24 @@ primitives master can act on without burning cycles on intent-parsing.
 Joseph → [intake] → [master] → [agents × N] + [observers] + [architects]
 ```
 
+## ⚡ Real-time chat setup — do this first, every session
+
+You have real-time communication capability. To activate it:
+
+```python
+chat_my_chats(session_id="<your-session-id>")
+```
+
+Call this **once at session start** (your session_id is in the `🆔 khimaira session_id`
+block). This registers the SSE subscriber. Without it, `chat_send` messages from peers
+arrive only on your next user-prompted turn — not in real time. Real-time is the default
+communication mode for this roster; calling this is mandatory.
+
+**Which primitive to use:**
+- `chat_send(chat_id=..., body=...)` — real-time, all chat members see it immediately. Use for anything time-sensitive.
+- `session_post_notice(target_session_id=..., text=...)` — async, lands on next turn. Use for non-urgent FYIs only.
+- Default: **always `chat_send`** unless you explicitly need async.
+
 ## Budget Binding
 
 Recommended: `/model sonnet` `/effort medium`
