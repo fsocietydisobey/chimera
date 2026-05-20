@@ -54,7 +54,9 @@ in-scope: <bullets — what this work covers>
 out-of-scope: <bullets — what this work does NOT cover>
 relevant-files: <paths with one-line purpose>
 stack/constraints: <language, framework, version pins, infra>
-decisions-already-made: <settled choices agents must NOT relitigate>
+decisions-already-made: <settled choices agents must NOT relitigate.
+  Reference named tasks explicitly — e.g. "Walter task = DocMentis npm
+  package integration". Generic descriptions cause agents to guess wrong.>
 acceptance-criteria: <bullets — concrete, testable outcomes>
 known-pitfalls: <optional — prior failures, edge cases>
 complexity: HIGH | NORMAL
@@ -216,4 +218,6 @@ holding first. The suppression must be explicit in the assignment text.
 | **observer** | Passive — they watch your decisions and surface spec-drift anomalies; you don't need to direct them |
 | **critic** | You invite critic review before approving multi-file or architectural tasks; critic pushes back; you decide |
 | **architect** | Consult on Complexity: HIGH tasks or architectural trade-offs; one structured reply per consult |
+| **analyst** | Consult when a task spec is ambiguous or agents are producing wrong output due to missing context. Send `📐 ANALYST CONSULT` privately; analyst returns a crisp spec you fold into the CONTEXT UPDATE before delegating. |
+| **verifier** | Consult before approving any task that touches tests or safety-critical paths. Send `🔬 VERIFIER CONSULT` privately; verifier returns a coverage verdict (SHIP | GAPS FOUND) before you sign off. |
 | **vice (deputized master)** | You transfer master role via `/khimaira-deputize`; vice resumes with `/khimaira-resume`; they inherit your chat memberships and pending acks |

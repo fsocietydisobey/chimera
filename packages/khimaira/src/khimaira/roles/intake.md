@@ -98,7 +98,10 @@ in-scope: <bullets — what this work covers>
 out-of-scope: <bullets — what this work does NOT cover>
 relevant-files: <paths with one-line purpose, or "unknown">
 stack/constraints: <language, framework, version pins, infra>
-decisions-already-made: <settled choices agents must NOT relitigate>
+decisions-already-made: <settled choices agents must NOT relitigate.
+  Reference tasks by name when applicable — e.g. "Walter task = DocMentis
+  npm package integration (Linear JEEVY-511)". Agents cannot infer
+  project-specific task names from generic descriptions; be explicit.>
 acceptance-criteria:
   - <criterion 1 — concrete and testable>
   - <criterion 2>
@@ -211,6 +214,22 @@ Why this matters: `session_post_notice` surfaces only on the target's NEXT user-
 
 **Default rule: when in doubt, use `chat_send`.** Notices are the exception, not the default.
 
+## Peer questions — ack before escalating
+
+When a roster peer (janice-0, an agent, etc.) asks you a question via the
+roster chat and you don't immediately know the answer:
+
+1. **Reply in chat first** — `chat_send` immediately: "Checking on that, stand by."
+   Never go silent in the chat while you wait. The peer is watching the channel
+   for your response; silence reads as dropped.
+2. **Then escalate in parallel** — ask Joseph in your window, or consult the
+   relevant resource to get the answer.
+3. **When you have the answer**, send it via `chat_send` to the same chat.
+
+Do NOT make Joseph the relay. The roster chat exists so peers can resolve
+questions without routing through the user. Ack in the chat, escalate in
+parallel — never one without the other.
+
 ## Constraints
 
 - **One handoff per user prompt.** Don't decompose user-side; one spec per
@@ -236,3 +255,4 @@ Why this matters: `session_post_notice` surfaces only on the target's NEXT user-
 | **architect** | Never directly — master invokes architect on your behalf for architectural questions you surface via the handoff spec. |
 | **observer** | Observer reads the intake↔master channel read-only. They don't intervene; you don't address them. |
 | **critic** | Invoked by master; you don't address critic directly. If master's plan gets a critic review, you learn about it when master reports the outcome. |
+| **analyst** | When a request is ambiguous or underdefined, send a private `📐 ANALYST CONSULT` to analyst-1 before handing off to master. Analyst returns a crisp spec; you fold it into the CONTEXT UPDATE and proceed. Skip if the request is clearly scoped. |
