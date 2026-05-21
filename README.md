@@ -16,7 +16,7 @@ UI to learn.**
 khimaira gives you a structured way to run parallel Claude Code
 sessions as a coordinated team:
 
-- **6-role agent topology** — intake → master → agents / observers / architects / critics, each at the right model tier
+- **8-role agent topology** — intake → master → agents / observers / architects / critics / analysts / verifiers, each at the right model tier
 - **Cross-session real-time chat** via the `khimaira-chat` primitive (SSE delivery, task lifecycle, private DMs)
 - **Automated cost routing** — `mcp__khimaira__auto` classifies and routes every prompt to the cheapest competent model in your pool
 - **Enforcement-gate task assignment** — `/khimaira-assign` fans out tasks to N agents in one daemon round-trip; agents can't start until they've verified their budget settings
@@ -58,9 +58,9 @@ Two routes earn savings credit:
   Native model-swap; recorded by the `SubagentStop` hook. A single
   `khimaira-factual` dispatch on Haiku shows ~94.7% savings vs Opus.
 
-The 6-role orchestration topology amplifies this further: routine
-coordination runs at sonnet/medium, observers at haiku, and architect
-(opus/max) only fires when you explicitly consult it.
+The 8-role orchestration topology amplifies this further: routine
+coordination runs at sonnet/medium, observers at haiku, and architect +
+analyst (opus) only fire when you explicitly consult them.
 
 Override the baseline via `KHIMAIRA_USAGE_BASELINE_MODEL=claude-sonnet-4-6`
 or `baseline_model:` in `~/.khimaira/models.yaml`.
@@ -83,14 +83,19 @@ flowchart TD
     agent2["agent-2\nsonnet / medium"]
     observer["observer-1\nhaiku / default"]
     architect["architect-1\nopus / max"]
+    analyst["analyst-1\nopus / medium"]
+    verifier["verifier-1\nopus / max"]
     critic["critic\nad-hoc"]
 
     Joseph -->|request| intake
+    intake -->|"📋 CONTEXT UPDATE\n(broadcast)"| master
     intake -->|"🎯 INTAKE HANDOFF\n(private DM)"| master
+    intake -.->|"ambiguous?"| analyst
     master -->|"/khimaira-assign"| agent1
     master -->|"/khimaira-assign"| agent2
     master -->|monitors| observer
     master -->|"/khimaira-consult"| architect
+    master -.->|"correctness gate"| verifier
     master -.->|"summoned\nfor review"| critic
 
     style Joseph fill:#f0f0f0
@@ -100,6 +105,8 @@ flowchart TD
     style agent2 fill:#d1fae5
     style observer fill:#fef9c3
     style architect fill:#fce7f3
+    style analyst fill:#fce7f3
+    style verifier fill:#fce7f3
     style critic fill:#fee2e2
 ```
 
@@ -107,21 +114,37 @@ flowchart TD
 
 | Role | Model | Effort | Job |
 |---|---|---|---|
-| `intake` | sonnet | medium | User-facing front-end; parses intent → structured handoff to master |
+| `intake` | sonnet | medium | User-facing front-end; parses intent → CONTEXT UPDATE broadcast + handoff to master |
 | `master` | sonnet | medium | Orchestrator; decomposes, delegates, integrates |
 | `agent` | sonnet | medium | Executor; runs assigned tasks via enforcement-gate protocol |
-| `observer` | haiku | default | Read-only auditor; surfaces anomalies |
+| `observer` | haiku | default | Read-only auditor; surfaces anomalies and spec drift |
 | `architect` | opus | max | Synthesis sidecar; consulted on-demand for design decisions |
+| `analyst` | opus | medium | Ambiguity resolver; converts fuzzy intent → crisp spec before delegation |
+| `verifier` | opus | max | Correctness gate; validates test coverage (mode A) or library upgrades (mode B) |
 | `critic` | (caller picks) | (caller picks) | Constructive challenger; summoned ad-hoc for review |
 
 Master was moved from opus/max to sonnet/medium — routine coordination
 is mechanical. Architect at opus/max is reserved for synthesis
 questions where depth matters.
 
-### Bootstrap a roster in one command
+### Bootstrap a roster in two steps
 
-Open your role-prefixed windows (`agent-1`, `agent-2`, `observer-1`,
-`architect-1`, `intake-1`) then in master's window:
+**Step 1 — launch the windows** (in a terminal, not inside Claude):
+
+```bash
+roster           # 8 kitty tabs: khimaira-0, intake-1, agent-1/2/3, observer-1, architect-1, critic-1
+roster resume    # same tabs, resume by name (after a restart)
+
+roster jp        # jp roster: janice-0, jp-intake-1, jp-agent-1/2/3, …
+roster jp resume
+
+# Optional flags:
+# --analyst   adds analyst-1 tab (opus/max)
+# --verifier  adds verifier-1 tab (opus/max)
+# --agents N  number of agent tabs (default: 3)
+```
+
+**Step 2 — wire up the roster chat** (inside `khimaira-0`'s window):
 
 ```
 /khimaira-bootstrap-roster
@@ -137,6 +160,7 @@ For non-default names or explicit mappings:
 
 ```
 /khimaira-bootstrap-roster intake=front-desk agent=worker-a,worker-b
+/khimaira-bootstrap-roster --prefix jp    # jp roster
 ```
 
 ### How a task flows
@@ -144,19 +168,41 @@ For non-default names or explicit mappings:
 **1. You ask intake:**
 > "Can we add rate limiting to the auth endpoints?"
 
-Intake formats a structured handoff to master (private DM):
+Intake first broadcasts a `CONTEXT UPDATE` to the full chat — one block that all agents share:
+```
+📋 CONTEXT UPDATE v1 — ctx-3f9a1b2c
+project: /home/you/dev/myapp
+goal: Add configurable rate limiting to all auth endpoints
+in-scope: auth/ directory, middleware layer, config
+out-of-scope: public read endpoints, billing
+relevant-files: src/auth/middleware.py, src/config.py
+decisions-already-made: 429 response shape already defined in API spec
+acceptance-criteria:
+  - 429 after N req/min (N configurable via env)
+  - existing tests still pass
+  - middleware tested independently
+```
+
+Then sends a slim private handoff to master:
 ```
 🎯 INTAKE HANDOFF [intake-id: 3f9a1b2c]
+ctx-id: ctx-3f9a1b2c
 Intent: Add rate limiting to auth endpoints
-Scope: auth/ directory; exclude public read endpoints
-Success criterion: 429 responses after N req/min, configurable
-Constraints: don't break existing tests
 ```
 
 **2. Master decomposes and delegates:**
+
+Master assigns tasks with slim bodies — context lives in the broadcast, not the task:
 ```
 /khimaira-assign agent-1,agent-2 "implement rate limiting middleware" \
     --model sonnet --effort medium
+```
+
+Each task body carries only three fields:
+```
+ctx-id: ctx-3f9a1b2c
+your-slice: implement the rate-limit middleware in src/auth/middleware.py
+deps: none
 ```
 
 The daemon coordinator handles everything in **one round-trip**:
@@ -542,13 +588,15 @@ tasks/
 | LangGraph observer (zero-touch, auto-correlation, trace waterfall) | ✅ |
 | Multi-session shared state + cross-session primitives | ✅ |
 | Process observability (`wait_for_process` regex completion signal) | ✅ |
-| 6-role orchestration stack (v1.9.x) | ✅ |
+| 8-role orchestration stack (v1.9.x + analyst + verifier) | ✅ |
 | Enforcement-gate task assignment (`/khimaira-assign` + `/agent-ready`) | ✅ |
 | Private DMs + task privacy | ✅ |
 | Assign-batch coordinator (N assignments in 1 daemon round-trip) | ✅ |
 | Bootstrap roster (`/khimaira-bootstrap-roster`) | ✅ |
 | Role-file injection into SessionStart context (on boot, per chat role) | ✅ |
 | Missed-chat-events poll (cross-turn SSE replay) | ✅ |
+| Shared-context broadcast (CONTEXT UPDATE v1 protocol; intake.md + master.md + agent.md + observer.md) | ✅ |
+| API removal — all nodes on CLI runners; `langchain-anthropic` dep deleted | ✅ |
 | Bootstrap framework + profile-driven cross-machine install | ✅ |
 | Phase 1.5 — Task-source Protocol + JSONL/GitHub reference adapters | ✅ MVP |
 | Phase 1.0 — MCP-first self-configuration (`setup_*` MCP tools) | ⬜ next |
